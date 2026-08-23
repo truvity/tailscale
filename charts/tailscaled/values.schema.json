@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "tailscaled chart values",
+  "description": "Strict at the top level: unknown keys are rejected so a typo fails the render instead of being silently ignored. Kubernetes passthrough fields stay open.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "global": { "type": "object" },
+    "replicaCount": { "type": "integer", "minimum": 0 },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "advertiseRoutes": {
+      "type": "string",
+      "description": "Comma-separated CIDRs.",
+      "pattern": "^$|^[0-9a-fA-F.:]+/[0-9]+(,[0-9a-fA-F.:]+/[0-9]+)*$"
+    },
+    "hostname": { "type": "string" },
+    "extraArgs": { "type": "string" },
+    "secretName": { "type": "string", "minLength": 1 },
+    "secretKey": { "type": "string", "minLength": 1 },
+    "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+    "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+    "priorityClassName": { "type": "string" },
+    "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
+    "affinity": { "type": "object" },
+    "topologySpreadConstraints": { "type": "array", "items": { "type": "object" } },
+    "resources": { "type": "object" }
+  }
+}
