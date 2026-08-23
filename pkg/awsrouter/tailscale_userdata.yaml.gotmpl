@@ -1,0 +1,284 @@
+#cloud-config
+# Tailscale subnet router — cloud-init configuration
+# Template variables populated by Go: Region, AdvertiseRoutes, SSMAuthKeyPath,
+# WireGuardPort, PrimaryInterface, ASGName, LifecycleHookName.
+
+# ── First-boot patching: deliberately ABSENT ─────────────────────────
+# package_update/package_upgrade at first boot OOM-kills cloud-init on
+# t4g.nano (512MB): the AL2023 dnf metadata+upgrade pass exceeds RAM, the
+# kernel kills cloud-final, and everything downstream (package install,
+# runcmd, lifecycle-hook completion) dies with it. Patching is handled by
+# dnf-automatic + the nightly update/reboot script instead, which run
+# with the swap file below already active.
+
+# ── Swap — dnf headroom on 512MB instances ───────────────────────────
+swap:
+  filename: /swapfile
+  size: 1073741824
+  maxsize: 1073741824
+
+# ── Timezone ─────────────────────────────────────────────────────────
+# Explicit UTC — documents intent, avoids DST ambiguity.
+timezone: UTC
+
+# ── Packages ─────────────────────────────────────────────────────────
+# Declarative package installation — runs before runcmd.
+packages:
+  # ISO 27001 A.8.17 — clock synchronization (defensive; AL2023 includes chrony)
+  - chrony
+  # ISO 27001 A.12.4 — audit logging and file integrity monitoring
+  - audit
+  # ISO 27001 A.8.8 — automatic security updates
+  - dnf-automatic
+  # Provides needs-restarting for reboot-required detection
+  - dnf-utils
+  # Network security — host firewall
+  - firewalld
+  # Debug tools — installed declaratively, non-critical
+  - bind-utils
+  - nmap-ncat
+  - tcpdump
+  - traceroute
+
+# ── Boot-time recovery hook ──────────────────────────────────────────
+# bootcmd runs EVERY boot (before write_files on the first boot, where it
+# no-ops). Recent AL2023 images reboot mid-first-boot to apply a SELinux
+# kernel-cmdline change, SIGTERM-ing cloud-init's package/runcmd phases;
+# their run-once semaphores are consumed, so the join would never happen.
+# The join lives in an idempotent systemd unit started here on every boot.
+bootcmd:
+  - [ sh, -c, "systemctl daemon-reload && systemctl enable --now --no-block tailscale-join.service || true" ]
+
+# ── Configuration files ──────────────────────────────────────────────
+# Written before runcmd — services can be started with correct config.
+write_files:
+  # NTP hardening — ISO 27001 A.8.17
+  # Pin to Amazon Time Sync Service, disable default sources.
+  - path: /etc/chrony.d/99-hardening.conf
+    content: |
+      # Amazon Time Sync Service (link-local, no network dependency)
+      server 169.254.169.123 prefer iburst minpoll 4 maxpoll 6
+      # Amazon NTP pool as fallback
+      pool time.aws iburst
+
+  # IP forwarding — required for Tailscale subnet routing
+  - path: /etc/sysctl.d/99-tailscale.conf
+    content: |
+      net.ipv4.ip_forward=1
+      net.ipv6.conf.all.forwarding=1
+
+  # Audit rules — ISO 27001 file integrity monitoring
+  - path: /etc/audit/rules.d/99-iso27001.rules
+    content: |
+      -w /etc/passwd -p wa -k identity
+      -w /etc/group -p wa -k identity
+      -w /etc/sudoers -p wa -k privilege
+      -w /var/log/secure -p wa -k logins
+
+  # Persistent journald — survive reboots for post-mortem (drop-in, not sed)
+  - path: /etc/systemd/journald.conf.d/99-persistent.conf
+    content: |
+      [Journal]
+      Storage=persistent
+
+  # SSH hardening — defense in depth (no SSH port open, but harden anyway)
+  - path: /etc/ssh/sshd_config.d/99-hardening.conf
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      MaxAuthTries 3
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+
+  # Nightly update + conditional reboot — ISO 27001 A.8.8
+  # Runs daily at 00:00 UTC (01:00 CET / 02:00 CEST — Amsterdam night).
+  # Random sleep 0–7200s (0–2h) so multi-instance ASGs don't reboot simultaneously.
+  # dnf-automatic handles continuous patching; this script ensures pending
+  # kernel/library updates that require a reboot are applied nightly.
+  - path: /usr/local/sbin/nightly-update-reboot.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      exec >> /var/log/nightly-update-reboot.log 2>&1
+      echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') Starting nightly update cycle"
+
+      # Random delay 0–7200s (0–2h) to stagger reboots across ASG instances
+      DELAY=$((RANDOM % 7200))
+      echo "Sleeping ${DELAY}s before update"
+      sleep "$DELAY"
+
+      # Apply all available updates
+      dnf upgrade -y
+
+      # Reboot only if a running kernel or core library was updated
+      # needs-restarting -r exit codes: 0 = no reboot needed, 1 = reboot required
+      set +e
+      needs-restarting -r > /dev/null 2>&1
+      rc=$?
+      set -e
+      if [ "$rc" -eq 0 ]; then
+        echo "No reboot required"
+      elif [ "$rc" -eq 1 ]; then
+        echo "Reboot required — rebooting now"
+        reboot
+      else
+        echo "needs-restarting failed with exit code $rc — aborting"
+        exit 1
+      fi
+
+  # Cron entry for nightly update + reboot
+  - path: /etc/cron.d/nightly-update-reboot
+    permissions: "0644"
+    content: |
+      0 0 * * * root /usr/local/sbin/nightly-update-reboot.sh
+
+  # Tailscale RPM repo — written directly (no yum-config-manager dependency;
+  # dnf-utils may be missing when the first-boot package phase was killed).
+  - path: /etc/yum.repos.d/tailscale.repo
+    permissions: "0644"
+    content: |
+      [tailscale-stable]
+      name=Tailscale stable
+      baseurl=https://pkgs.tailscale.com/stable/amazon-linux/2023/$basearch
+      enabled=1
+      type=rpm
+      repo_gpgcheck=1
+      gpgcheck=1
+      gpgkey=https://pkgs.tailscale.com/stable/amazon-linux/2023/repo.gpg
+
+  # Idempotent tailnet join — the ONLY critical path on this instance.
+  # Retries until the router is joined, then completes the ASG lifecycle
+  # hook and writes a done-marker so later boots no-op.
+  - path: /usr/local/sbin/tailscale-join.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # Runs on EVERY boot (cloud-final drop-in + bootcmd + runcmd all arm it).
+      # Two-phase because of warm pools: the JOIN happens once (marker-gated),
+      # but a lifecycle action fires BOTH at warm-pool entry and again when the
+      # stopped instance starts into service — completion must run every boot.
+      set -uo pipefail
+      MARKER=/var/lib/tailscale-join.done
+      exec >> /var/log/tailscale-join.log 2>&1
+      echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') tailscale-join boot pass (marker: $([ -f $MARKER ] && echo present || echo absent))"
+
+      complete_hook() {
+        TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+        INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+        aws ec2 modify-instance-attribute --instance-id "$INSTANCE_ID" --no-source-dest-check --region {{ .Region }} || true
+        # No-op (swallowed error) when no lifecycle action is pending.
+        aws autoscaling complete-lifecycle-action \
+          --lifecycle-hook-name {{ .LifecycleHookName }} \
+          --auto-scaling-group-name {{ .ASGName }} \
+          --instance-id "$INSTANCE_ID" \
+          --lifecycle-action-result CONTINUE \
+          --region {{ .Region }} || true
+      }
+
+      if [ -f "$MARKER" ]; then
+        # Already joined (e.g. during warm-pool entry) — tailscaled reconnects
+        # from persisted state; just complete any pending lifecycle action.
+        systemctl is-active -q tailscaled || systemctl enable --now tailscaled || true
+        complete_hook
+        echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') hook pass done (already joined)"
+        exit 0
+      fi
+
+      for attempt in $(seq 1 20); do
+        if ! command -v tailscale >/dev/null 2>&1; then
+          dnf install -y tailscale && systemctl enable --now tailscaled
+        fi
+        if command -v tailscale >/dev/null 2>&1; then
+          systemctl is-active -q tailscaled || systemctl enable --now tailscaled
+          AUTH_KEY=$(aws ssm get-parameter --name {{ .SSMAuthKeyPath }} --with-decryption --query Parameter.Value --output text --region {{ .Region }}) || AUTH_KEY=""
+          if [ -n "$AUTH_KEY" ] && tailscale up --authkey "$AUTH_KEY" --advertise-routes={{ .AdvertiseRoutes }} --accept-dns=false; then
+            complete_hook
+            touch "$MARKER"
+            echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') joined + hook completed"
+            exit 0
+          fi
+        fi
+        echo "attempt $attempt failed; retrying in 15s"
+        sleep 15
+      done
+      echo "tailscale join failed after 20 attempts"
+      exit 1
+
+  # Primary arming path: cloud-final.service runs on EVERY boot (including
+  # warm-pool starts, where per-instance cloud-init modules are skipped) —
+  # its ExecStartPost drives the join script; "-" prefix keeps failures from
+  # failing cloud-final itself. bootcmd/runcmd arming below are belts.
+  - path: /etc/systemd/system/cloud-final.service.d/99-tailscale-join.conf
+    permissions: "0644"
+    content: |
+      [Service]
+      # StartPost covers the success path; StopPost also fires when
+      # cloud-final FAILS (e.g. OOM-killed mid-modules) — the join must
+      # not depend on cloud-init finishing cleanly.
+      ExecStartPost=-/usr/local/sbin/tailscale-join.sh
+      ExecStopPost=-/usr/local/sbin/tailscale-join.sh
+
+  # Systemd unit driving the join script (started by bootcmd every boot).
+  - path: /etc/systemd/system/tailscale-join.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Tailscale subnet-router join (idempotent, survives first-boot reboot)
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/tailscale-join.sh
+      TimeoutStartSec=900
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+# ── Runtime commands ─────────────────────────────────────────────────
+# Order-dependent, dynamic, or requiring Go template variables.
+runcmd:
+  # ── NTP hardening ────────────────────────────────────────────────
+  # Neutralize default chrony sources, then restart with hardened config.
+  - sed -i -E 's/^(server|pool|peer) /# &/' /etc/chrony.conf
+  - systemctl enable --now chronyd
+  - systemctl restart chronyd
+  # Force time step — retry on transient failures (chronyd may not be synced yet)
+  - |
+    for i in 1 2 3; do
+      chronyc makestep && break
+      echo "chronyc makestep attempt $i failed, retrying..."
+      sleep 2
+    done || true
+
+  # ── Kernel parameters ───────────────────────────────────────────
+  - sysctl --system
+
+  # ── Audit ───────────────────────────────────────────────────────
+  - systemctl enable --now auditd
+
+  # ── Journald ────────────────────────────────────────────────────
+  - mkdir -p /var/log/journal
+  - systemctl restart systemd-journald
+
+  # ── Automatic updates ──────────────────────────────────────────
+  - sed -i 's/apply_updates = no/apply_updates = yes/' /etc/dnf/automatic.conf
+  - systemctl enable --now dnf-automatic-install.timer
+
+  # ── Firewall ────────────────────────────────────────────────────
+  - systemctl enable --now firewalld
+  - firewall-cmd --permanent --zone=public --add-interface={{ .PrimaryInterface }}
+  - firewall-cmd --permanent --zone=public --add-port={{ .WireGuardPort }}/udp
+  - firewall-cmd --permanent --zone=public --add-masquerade
+  - firewall-cmd --permanent --zone=trusted --add-interface=tailscale0
+  - firewall-cmd --reload
+
+  # ── Tailscale join ──────────────────────────────────────────────
+  # All join logic (install from signed repo, SSM auth key, tailscale up,
+  # source/dest check, lifecycle-hook completion) lives in the
+  # tailscale-join systemd unit so it survives the AL2023 first-boot
+  # SELinux reboot; bootcmd re-arms it on every boot until done.
+  - systemctl daemon-reload
+  - systemctl enable --now --no-block tailscale-join.service

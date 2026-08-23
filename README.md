@@ -8,7 +8,7 @@ Tailscale for Kubernetes estates, as reusable mechanism:
 | `charts/tsdns` | Split-DNS gateway — CoreDNS on a pinned ClusterIP serving `cluster.<name>` plus forwarded zones | shipped |
 | `pkg/acl` | Pure tailnet policy builder — tag ownership hierarchy, two access tiers, per-environment auto-approver isolation — from a neutral model; deterministic JSON out | shipped |
 | `pkg/tailnet` | Pulumi Go: the ACL resource (sole-owner semantics), router auth keys (ephemeral+tagged, rotation-by-name), split DNS, S3 flow logs, pinned service-IP helper | shipped |
-| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router (the one cloud-specific package) | planned |
+| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet — SG, SSM-only IAM profile (optional permissions boundary), launch template + user data, ASG with warm pool (the one cloud-specific package) | shipped |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag; the
 Go module is `github.com/truvity/tailscale`.

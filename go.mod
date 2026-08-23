@@ -3,6 +3,7 @@ module github.com/truvity/tailscale
 go 1.26.7
 
 require (
+	github.com/pulumi/pulumi-aws/sdk/v7 v7.42.0
 	github.com/pulumi/pulumi-tailscale/sdk v0.29.0
 	github.com/pulumi/pulumi/sdk/v3 v3.258.0
 	github.com/stretchr/testify v1.11.1
