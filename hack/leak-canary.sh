@@ -30,9 +30,14 @@ patterns=(
 fail=0
 for p in "${patterns[@]}"; do
   # Exclude this script: it necessarily contains the patterns it bans.
+  # go.sum/go.mod carry pseudo-version timestamps (v0.0.0-20200514113438-…)
+  # whose digit runs false-positive the AWS-account-id pattern; their
+  # content is public dependency data by definition.
   if hits=$(grep -rInE "$p" . \
               --exclude-dir=.git \
               --exclude-dir=.devbox \
+              --exclude="go.sum" \
+              --exclude="go.mod" \
               --exclude="leak-canary.sh" 2>/dev/null); then
     echo "LEAK: pattern /$p/ matched — particulars belong in caller inputs:"
     echo "$hits" | head -5 | sed 's/^/    /'
