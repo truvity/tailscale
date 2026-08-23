@@ -15,7 +15,9 @@ set -uo pipefail
 
 patterns=(
   '[0-9]{12}'                          # AWS account id
-  'arn:aws'                            # any ARN
+  # No bare 'arn:aws' pattern here, unlike sibling repos: pkg/awsrouter
+  # necessarily COMPOSES ARNs from caller inputs (format strings with %s).
+  # A concrete leaked ARN still trips the 12-digit account-id pattern.
   '[0-9]{12}\.dkr\.ecr\.'              # ECR registry host
   # No '\.svc\.cluster\.local' pattern here, unlike the sibling repos: tsdns
   # is a DNS rewrite to exactly that domain, so the default render
