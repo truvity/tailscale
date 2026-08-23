@@ -1,0 +1,47 @@
+# tailscaled — a subnet router that makes cluster CIDRs reachable over a
+# tailnet. Userspace networking (no NET_ADMIN, no /dev/net/tun), so it
+# runs as an ordinary non-root Deployment on any CNI.
+#
+# Scope: Deployment + ServiceAccount. The auth key Secret, the tailnet ACL
+# (tag owners, auto-approvers for the advertised routes) and any
+# NetworkPolicy are the estate's — see the README for the split.
+
+replicaCount: 2
+
+image:
+  repository: tailscale/tailscale
+  tag: "stable"
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: tailscaled
+  annotations: {}
+
+# Comma-separated CIDRs to advertise (--advertise-routes). Typically the
+# cluster's Service CIDR, plus the node/VPC CIDR if you want nodes too.
+advertiseRoutes: ""
+# Tailnet hostname of this router (--hostname). Make it say which cluster.
+hostname: ""
+# Extra tailscale flags appended to TS_EXTRA_ARGS.
+extraArgs: ""
+
+# Secret holding the auth key (a reusable, pre-authorized, TAGGED key —
+# an ephemeral one is reasonable for replicas > 1).
+secretName: tailscaled-auth-key
+secretKey: auth-key
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 128Mi

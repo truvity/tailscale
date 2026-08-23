@@ -1,0 +1,21 @@
+apiVersion: v2
+name: tailscaled
+description: >-
+  Tailscale subnet router for a Kubernetes cluster — userspace tailscaled
+  as a plain Deployment advertising the CIDRs you name, auth key from any
+  Secret.
+type: application
+# Placeholder: the git tag is the sole version authority. The release
+# workflow stamps both fields from the tag (truvity/ci-workflows
+# release-public.yaml).
+version: 0.0.0
+appVersion: 0.0.0
+home: https://github.com/truvity/tailscale
+sources:
+  - https://github.com/truvity/tailscale
+keywords:
+  - tailscale
+  - subnet-router
+maintainers:
+  - name: Truvity
+    url: https://github.com/truvity

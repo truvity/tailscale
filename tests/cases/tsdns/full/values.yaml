@@ -1,0 +1,19 @@
+image:
+  repository: mirror.example/registry-k8s-io/coredns/coredns
+  tag: v1.12.1
+suffix: cluster.example
+clusterIP: 172.20.0.53
+resolverIP: 172.20.0.10
+forwardZones:
+  - zone: eks.amazonaws.example
+    resolver: 10.0.0.2
+nodeSelector:
+  kubernetes.io/arch: arm64
+tolerations:
+  - key: arch
+    value: arm64
+    operator: Equal
+    effect: NoSchedule
+podAnnotations:
+  example.com/checksum: abc
+priorityClassName: system-cluster-critical

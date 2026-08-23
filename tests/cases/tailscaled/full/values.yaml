@@ -1,0 +1,21 @@
+advertiseRoutes: "10.0.0.0/16,172.20.0.0/16"
+hostname: k8s-example-router
+extraArgs: "--accept-routes"
+nodeSelector:
+  kubernetes.io/arch: arm64
+tolerations:
+  - key: arch
+    operator: Exists
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: tailscaled
+podAnnotations:
+  example.com/checksum: abc
+priorityClassName: system-cluster-critical
+serviceAccount:
+  annotations:
+    example.com/role: router

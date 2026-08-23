@@ -1,0 +1,2 @@
+advertiseRoutes: "10.0.0.0/16,172.20.0.0/16"
+hostname: k8s-example-router

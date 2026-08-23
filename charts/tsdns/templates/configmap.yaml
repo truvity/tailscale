@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tsdns
+  labels:
+    app.kubernetes.io/name: tsdns
+data:
+  Corefile: |
+    {{ required "suffix is required" .Values.suffix }}:53 {
+        errors
+        health :8080
+        ready :8181
+        rewrite name suffix .svc.{{ .Values.suffix }}. .svc.{{ .Values.clusterDomain }}. answer auto
+        forward . {{ required "resolverIP is required" .Values.resolverIP }}
+        cache 30
+        prometheus :9153
+    }
+    {{- range .Values.forwardZones }}
+    {{ .zone }}:53 {
+        errors
+        forward . {{ .resolver }}
+        cache 30
+    }
+    {{- end }}

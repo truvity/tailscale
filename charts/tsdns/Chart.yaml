@@ -1,0 +1,22 @@
+apiVersion: v2
+name: tsdns
+description: >-
+  Tailnet DNS gateway — a CoreDNS instance on a pinned ClusterIP that
+  serves cluster.<name> (rewritten to the in-cluster resolver) and
+  optional forwarded zones, for Tailscale split DNS.
+type: application
+# Placeholder: the git tag is the sole version authority. The release
+# workflow stamps both fields from the tag (truvity/ci-workflows
+# release-public.yaml).
+version: 0.0.0
+appVersion: 0.0.0
+home: https://github.com/truvity/tailscale
+sources:
+  - https://github.com/truvity/tailscale
+keywords:
+  - tailscale
+  - split-dns
+  - coredns
+maintainers:
+  - name: Truvity
+    url: https://github.com/truvity

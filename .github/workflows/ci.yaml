@@ -1,0 +1,36 @@
+# Calls the shared workflow (truvity/ci-workflows), which runs each
+# Justfile recipe as its OWN parallel job, reported under its own name.
+#
+# Pinned by COMMIT SHA, never a tag — tags move, and this code runs in
+# every repository of both organizations.
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  recipes:
+    uses: truvity/ci-workflows/.github/workflows/check.yaml@24c5e10642b91e6e4922801d2f3727658171de56 # v2.10.7
+    with:
+      recipes: '["build", "lint", "test", "leak-canary"]'
+
+  # Stable name for branch protection: the matrix reports as
+  # "recipes / lint" and so on, so a required context called "check"
+  # would never arrive and every PR would hang waiting for it.
+  check:
+    needs: recipes
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: '[ "${{ needs.recipes.result }}" = "success" ]'

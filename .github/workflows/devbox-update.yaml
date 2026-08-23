@@ -1,0 +1,14 @@
+name: Devbox Update
+
+on:
+  schedule:
+    - cron: "0 1 * * *" # daily: go directive aligned every day, full devbox update on Monday (mode auto)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    uses: truvity/ci-workflows/.github/workflows/devbox-update.yaml@24c5e10642b91e6e4922801d2f3727658171de56 # v2.10.7
+    secrets: inherit

@@ -1,0 +1,24 @@
+# Tag-triggered release through truvity/ci-workflows release-public.yaml,
+# which runs goreleaser and then pushes every chart under charts/ to
+# ghcr.io/truvity/charts at the tag's version.
+#
+# No binaries: this repository ships Helm charts (and a Go library, which
+# needs no build step) — goreleaser's job here is the GitHub Release with
+# the changelog, nothing else. `skip: true` is its documented shape for
+# library projects.
+version: 2
+
+builds:
+  - skip: true
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^chore"
+      - "^ci"
+      - "^docs"
+      - "^test"
+
+release:
+  github: {}

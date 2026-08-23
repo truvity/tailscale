@@ -1,0 +1,32 @@
+# Tag-triggered release — the shared implementation (truvity/ci-workflows).
+# goreleaser makes the GitHub Release (no binaries here, see
+# .goreleaser.yaml); every chart listed below is packaged at the tag's
+# version and pushed to oci://ghcr.io/truvity/charts/<chart>.
+#
+# The caller grants the permissions because a reusable workflow can
+# narrow them but never widen them.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+# Never cancel a running publish — a half-pushed artifact set is worse
+# than a queued wait.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      packages: write
+    uses: truvity/ci-workflows/.github/workflows/release-public.yaml@24c5e10642b91e6e4922801d2f3727658171de56 # v2.10.7
+    with:
+      charts: '["tailscaled", "tsdns"]'

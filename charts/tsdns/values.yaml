@@ -1,0 +1,58 @@
+# tsdns — the DNS gateway that gives every tailnet client a per-cluster
+# name space without exposing the cluster resolver.
+#
+# Two jobs:
+#   1. `suffix` (e.g. cluster.example): rewrite *.svc.<suffix> →
+#      *.svc.<clusterDomain> and forward to the in-cluster resolver, so a
+#      tailnet client resolves `foo.bar.svc.cluster.example` to a Service
+#      it can reach through the subnet router. The suffix is deliberately
+#      NOT the cluster domain: these names resolve only over the tailnet.
+#   2. `forwardZones`: extra zones forwarded to a resolver the pod can
+#      reach but tailnet clients cannot (a cloud provider's private API
+#      endpoint zone, say).
+#
+# Pair it with Tailscale split DNS: point <suffix> at `clusterIP`, which
+# is pinned because the split-DNS entry is written out-of-band and the
+# allocator would otherwise hand out whatever is free.
+
+image:
+  repository: registry.k8s.io/coredns/coredns
+  tag: "v1.12.1"
+  pullPolicy: IfNotPresent
+
+replicas: 2
+
+# Tailnet-only name space served by this gateway (required).
+suffix: ""
+# Pinned ClusterIP for the Service, inside the cluster's Service CIDR (required).
+clusterIP: ""
+# The in-cluster resolver (kube-dns / CoreDNS ClusterIP) the suffix is forwarded to (required).
+resolverIP: ""
+# The cluster's own domain, the rewrite target.
+clusterDomain: cluster.local
+
+# Extra zones forwarded to a resolver the gateway can reach.
+#   - zone: eks.amazonaws.example
+#     resolver: 10.0.0.2
+forwardZones: []
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: tsdns
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
