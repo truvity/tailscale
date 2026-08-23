@@ -7,8 +7,7 @@ Tailscale for Kubernetes estates, as reusable mechanism:
 | `charts/tailscaled` | Subnet router — userspace `tailscaled` as a plain Deployment, advertising the CIDRs you name | shipped |
 | `charts/tsdns` | Split-DNS gateway — CoreDNS on a pinned ClusterIP serving `cluster.<name>` plus forwarded zones | shipped |
 | `pkg/acl` | Pure tailnet policy builder — tag ownership hierarchy, two access tiers, per-environment auto-approver isolation — from a neutral model; deterministic JSON out | shipped |
-| `pkg/tailnet` | Pulumi Go: the policy, OAuth/auth keys, split DNS, optional flow logs | planned |
-| `pkg/k8srouter` | Pulumi Go: per-cluster router keys and split-DNS entries | planned |
+| `pkg/tailnet` | Pulumi Go: the ACL resource (sole-owner semantics), router auth keys (ephemeral+tagged, rotation-by-name), split DNS, S3 flow logs, pinned service-IP helper | shipped |
 | `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router (the one cloud-specific package) | planned |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag; the
@@ -79,8 +78,8 @@ helm install tsdns oci://ghcr.io/truvity/charts/tsdns --version <tag> \
 | `image.repository` / `image.tag` | `registry.k8s.io/coredns/coredns` / pinned | point `repository` at a pull-through cache if the gateway must not depend on the internet |
 
 Then add a Tailscale split-DNS nameserver for `<suffix>` → `<clusterIP>`,
-restricted to the cluster's router tag (that is `pkg/k8srouter`'s job once
-it lands; until then, the admin console or your own Pulumi).
+restricted to the cluster's router tag (`pkg/tailnet`'s NewSplitDNS +
+NewRouterKey are the Pulumi half of that wiring).
 
 ## Development
 
