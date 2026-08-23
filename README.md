@@ -6,7 +6,7 @@ Tailscale for Kubernetes estates, as reusable mechanism:
 | --- | --- | --- |
 | `charts/tailscaled` | Subnet router — userspace `tailscaled` as a plain Deployment, advertising the CIDRs you name | shipped |
 | `charts/tsdns` | Split-DNS gateway — CoreDNS on a pinned ClusterIP serving `cluster.<name>` plus forwarded zones | shipped |
-| `pkg/acl` | Pure tailnet policy builder (tag owners, auto-approvers, per-group access) from a neutral model | planned |
+| `pkg/acl` | Pure tailnet policy builder — tag ownership hierarchy, two access tiers, per-environment auto-approver isolation — from a neutral model; deterministic JSON out | shipped |
 | `pkg/tailnet` | Pulumi Go: the policy, OAuth/auth keys, split DNS, optional flow logs | planned |
 | `pkg/k8srouter` | Pulumi Go: per-cluster router keys and split-DNS entries | planned |
 | `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router (the one cloud-specific package) | planned |
