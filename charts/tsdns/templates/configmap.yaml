@@ -22,3 +22,10 @@ data:
         cache 30
     }
     {{- end }}
+    {{- if .Values.catchAll }}
+    .:53 {
+        errors
+        forward . {{ .Values.resolverIP }}
+        cache 30
+    }
+    {{- end }}

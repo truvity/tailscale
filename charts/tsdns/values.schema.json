@@ -21,6 +21,7 @@
     "clusterIP": { "type": "string", "minLength": 1 },
     "resolverIP": { "type": "string", "minLength": 1 },
     "clusterDomain": { "type": "string", "minLength": 1 },
+    "catchAll": { "type": "boolean" },
     "forwardZones": {
       "type": "array",
       "items": {
