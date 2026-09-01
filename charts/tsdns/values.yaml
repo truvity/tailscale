@@ -36,6 +36,18 @@ clusterDomain: cluster.local
 #     resolver: 10.0.0.2
 forwardZones: []
 
+# Serve every OTHER name too, by forwarding it to resolverIP — off by
+# default, where the gateway answers only its declared zones and REFUSES
+# the rest. Turning this on makes tsdns usable as a pod's ONLY
+# nameserver (dnsPolicy: None), which is what lets an in-cluster pod
+# resolve the tailnet suffix: the managed cluster resolver (EKS Auto
+# Mode) has no Corefile to add the suffix to, and as a SECOND nameserver
+# tsdns is never consulted — a stub resolver treats the first server's
+# NXDOMAIN as final, and musl queries all servers in parallel and races.
+# The refuse-by-default posture stays for existing deployments; a pod
+# opting in accepts tsdns on its critical path for ALL resolution.
+catchAll: false
+
 podAnnotations: {}
 podLabels: {}
 priorityClassName: ""
