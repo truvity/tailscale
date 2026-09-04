@@ -76,7 +76,7 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
       containers:
         - name: coredns
-          image: "registry.k8s.io/coredns/coredns:v1.12.1"
+          image: "registry.k8s.io/coredns/coredns:v1.14.7"
           imagePullPolicy: IfNotPresent
           args: ["-conf", "/etc/coredns/Corefile"]
           ports:
