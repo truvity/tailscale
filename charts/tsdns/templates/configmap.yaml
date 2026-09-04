@@ -8,6 +8,13 @@ data:
   Corefile: |
     {{ required "suffix is required" .Values.suffix }}:53 {
         errors
+    {{- if .Values.debugLog }}
+        # Tagged with the block name: CoreDNS picks a server block by
+        # longest-zone match, and "which block answered" is exactly what
+        # you cannot tell from an NXDOMAIN. A suffix query showing up
+        # under catchall means routing, not the rewrite, is the problem.
+        log . "suffix-block {remote} {type} {name} -> {rcode} {>rflags} {duration}"
+    {{- end }}
         health :8080
         ready :8181
         rewrite name suffix .svc.{{ .Values.suffix }}. .svc.{{ .Values.clusterDomain }}. answer auto
@@ -18,6 +25,9 @@ data:
     {{- range .Values.forwardZones }}
     {{ .zone }}:53 {
         errors
+    {{- if $.Values.debugLog }}
+        log . "forwardzone-block {remote} {type} {name} -> {rcode} {>rflags} {duration}"
+    {{- end }}
         forward . {{ .resolver }}
         cache 30
     }
@@ -25,6 +35,9 @@ data:
     {{- if .Values.catchAll }}
     .:53 {
         errors
+    {{- if .Values.debugLog }}
+        log . "catchall-block {remote} {type} {name} -> {rcode} {>rflags} {duration}"
+    {{- end }}
         forward . {{ .Values.resolverIP }}
         cache 30
     }
