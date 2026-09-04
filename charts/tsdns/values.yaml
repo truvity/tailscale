@@ -48,6 +48,13 @@ forwardZones: []
 # opting in accepts tsdns on its critical path for ALL resolution.
 catchAll: false
 
+# Per-query logging, tagged with the server block that answered. OFF by
+# default: this is a diagnostic for "the gateway returns NXDOMAIN for a
+# name it owns", where the one fact you cannot get from outside is which
+# block handled the query and what it forwarded. Costs a log line per
+# query, so turn it on deliberately and turn it back off.
+debugLog: false
+
 podAnnotations: {}
 podLabels: {}
 priorityClassName: ""
