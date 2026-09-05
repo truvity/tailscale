@@ -39,9 +39,17 @@ tolerations: []
 affinity: {}
 topologySpreadConstraints: []
 
+# Userspace networking means netstack buffers EVERY proxied connection in
+# the Go heap, so memory tracks concurrent connections, not anything
+# static. Idle sits around 20-45Mi; the old 128Mi ceiling left no room
+# for a burst, and a router in front of churning backends (pods moving,
+# the client re-dialling each one) OOMKilled repeatedly at 128Mi while
+# reporting 44Mi steady-state -- observed on truvity devel, 16 restarts
+# in 4h. There is deliberately no cpu limit: throttling a router adds
+# latency to every packet instead of shedding one pod.
 resources:
   requests:
     cpu: 10m
-    memory: 64Mi
-  limits:
     memory: 128Mi
+  limits:
+    memory: 512Mi
