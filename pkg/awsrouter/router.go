@@ -1,6 +1,6 @@
 // Package awsrouter provisions the EC2 half of a tailnet: an
 // auto-scaling subnet router fleet — security group, IAM instance
-// profile (SSM-managed, no SSH key), launch template with cloud-init
+// profile (least privilege, no SSH key), launch template with cloud-init
 // user data, and the ASG with an optional warm pool — reading its
 // tagged auth key from an SSM parameter the tailnet stack wrote
 // (pkg/tailnet NewRouterKey → the caller's SSM write).
@@ -8,7 +8,10 @@
 // SSH is off by default: no key pair, no port in the security group.
 // A caller that sets TrustedUserCAKeys and AuthorizedPrincipals gets
 // sshd admitting OpenSSH user certificates from those CAs only, over
-// the tailnet interface — see ssh.go.
+// the tailnet interface — see ssh.go. There is no other shell (no SSM
+// Session Manager): break-glass is replacing the instance, and
+// diagnosis is the serial console (`aws ec2 get-console-output`),
+// where cloud-init and the join script log.
 //
 // This is the ONE deliberately cloud-specific package in the module:
 // everything else is provider-agnostic, an EC2 router is AWS by
@@ -211,7 +214,9 @@ func createTailscaleSG(
 	env := config.Environment
 
 	sg, err := ec2.NewSecurityGroup(c, "tailscale-sg", &ec2.SecurityGroupArgs{
-		Name:        pulumi.String(config.baseName()),
+		Name: pulumi.String(config.baseName()),
+		// Historical wording ("SSM access"): a description change forces
+		// AWS to replace the security group, so it stays as is.
 		Description: pulumi.String("Tailscale subnet router - WireGuard UDP ingress, SSM access"),
 		VpcId:       config.VPCID.ToStringOutput(),
 		Tags: pulumi.StringMap{
@@ -398,14 +403,11 @@ func createTailscaleInstanceProfile(
 		return nil, fmt.Errorf("create Tailscale IAM role: %w", err)
 	}
 
-	// Attach AmazonSSMManagedInstanceCore managed policy (SSM Session Manager)
-	_, err = iam.NewRolePolicyAttachment(c, "tailscale-role/ssm-core", &iam.RolePolicyAttachmentArgs{
-		Role:      role.Name,
-		PolicyArn: pulumi.String("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"),
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return nil, fmt.Errorf("attach SSM managed policy: %w", err)
-	}
+	// No AmazonSSMManagedInstanceCore: it grants ssm:GetParameter(s) on
+	// every parameter in the account (which, with kms-decrypt-ssm above,
+	// reads every default-key SecureString) and routers run no Session
+	// Manager shell. Break-glass is replacing the instance; diagnosis is
+	// the serial console output (README "Break-glass").
 
 	instanceProfile, err := iam.NewInstanceProfile(c, "tailscale-instance-profile", &iam.InstanceProfileArgs{
 		Name: pulumi.String(config.baseName()),
