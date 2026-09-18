@@ -1,0 +1,2 @@
+# A typo must fail the render instead of being silently ignored.
+advertiseRoute: 10.0.0.0/16

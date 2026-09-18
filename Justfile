@@ -1,17 +1,30 @@
 # Development commands. Everything CI runs is a recipe here — the shared
 # check workflow (truvity/ci-workflows) runs each one as its own job.
 
+charts := "tailscaled tsdns"
+
 # Lint every chart and the Go module.
 # tsdns lints with its minimal test case: the schema REQUIRES
 # suffix/clusterIP/resolverIP (the chart is meaningless without them),
-# and lint validates the merged values. The negative renders prove the
-# schema rejects an unknown key.
+# and lint validates the merged values. Every negative fixture under
+# tests/invalid/<chart>/ must fail to render — one that renders is a hole
+# in the validation nobody would otherwise notice.
 lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
     helm lint charts/tailscaled
     helm lint charts/tsdns -f tests/cases/tsdns/minimal/values.yaml
     ! helm template tailscaled charts/tailscaled --set bogusKey=1 >/dev/null 2>&1
-    ! helm template tsdns charts/tsdns --set suffix=s --set clusterIP=1.2.3.4 --set resolverIP=1.2.3.5 --set bogusKey=1 >/dev/null 2>&1
     ! helm template tsdns charts/tsdns >/dev/null 2>&1
+    for chart in {{ charts }}; do
+      for values in tests/invalid/"$chart"/*.yaml; do
+        if helm template invalid "charts/$chart" -f "$values" >/dev/null 2>&1; then
+          echo "RENDERED BUT SHOULD HAVE FAILED: $values" >&2
+          exit 1
+        fi
+      done
+      echo "$chart: schema and $(ls tests/invalid/"$chart"/*.yaml | wc -l | tr -d ' ') negative fixtures OK"
+    done
     golangci-lint config verify
     golangci-lint run ./...
 

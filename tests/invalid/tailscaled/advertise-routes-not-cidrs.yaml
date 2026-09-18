@@ -1,0 +1,3 @@
+# Routes are comma-separated CIDRs; anything else reaches tailscaled as an
+# argument it rejects at start-up.
+advertiseRoutes: "10.0.0.0/16 10.1.0.0/16"
