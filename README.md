@@ -8,7 +8,7 @@ Tailscale for Kubernetes estates, as reusable mechanism:
 | `charts/tsdns` | Split-DNS gateway — CoreDNS on a pinned ClusterIP serving `cluster.<name>` plus forwarded zones | shipped |
 | `pkg/acl` | Pure tailnet policy builder — tag ownership hierarchy, two access tiers, per-environment auto-approver isolation — from a neutral model; deterministic JSON out | shipped |
 | `pkg/tailnet` | Pulumi Go: the ACL resource (sole-owner semantics), router auth keys (ephemeral+tagged, rotation-by-name), split DNS, S3 flow logs, pinned service-IP helper | shipped |
-| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet — SG, SSM-only IAM profile (optional permissions boundary), launch template + user data, ASG with warm pool, optional SSH user-certificate login (the one cloud-specific package) | shipped |
+| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet — SG, least-privilege IAM profile (optional permissions boundary), launch template + user data, ASG with warm pool, optional SSH user-certificate login (the one cloud-specific package) | shipped |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag; the
 Go module is `github.com/truvity/tailscale`.
@@ -84,7 +84,8 @@ NewRouterKey are the Pulumi half of that wiring).
 ## pkg/awsrouter: SSH user certificates
 
 Routers have no SSH by default: no key pair, no TCP port in the security
-group, SSM Session Manager as the console. Two optional inputs turn on
+group, and no other shell either (see [Break-glass](#pkgawsrouter-break-glass)).
+Two optional inputs turn on
 OpenSSH **user certificate** login, reached over the tailnet:
 
 ```go
@@ -116,14 +117,43 @@ router's tag on port 22. A certificate is refused when it is expired,
 when another CA signed it, or when none of its principals is listed for
 the login user.
 
-With neither set, the user data renders byte-for-byte as before these
-inputs existed (pinned by `pkg/awsrouter/testdata/userdata-default.yaml`),
-so upgrading the module replaces no router.
+With neither set, the SSH inputs add nothing to the user data (the
+default render is pinned by `pkg/awsrouter/testdata/userdata-default.yaml`;
+a change to it is a new launch template version, which the instance
+refresh rolls through the fleet).
 
 **Rotating the CA:** add the new key next to the old one, roll the
 fleet (the launch template changes, and the ASG's instance refresh
 replaces the instances), move signing to the new CA, wait out the
 longest certificate lifetime, remove the old key, and roll again.
+
+## pkg/awsrouter: break-glass
+
+A router has no interactive access unless the SSH inputs above are set:
+no SSM Session Manager (the instance role carries no
+`AmazonSSMManagedInstanceCore`, which would also grant `ssm:GetParameter`
+on every parameter in the account), no key pair. A router is cattle:
+
+- **Diagnose** from the serial console, no shell needed. cloud-init and
+  the join script (`/usr/local/sbin/tailscale-join.sh`, which installs
+  Tailscale, reads the auth key, runs `tailscale up` and completes the
+  lifecycle hook) both write there:
+
+  ```sh
+  aws ec2 get-console-output --latest --output text --instance-id i-0123456789abcdef0
+  ```
+
+- **Repair** by replacing it. The ASG launches a fresh router (from the
+  warm pool when there is one) and the launch lifecycle hook keeps it out
+  of service until it has joined:
+
+  ```sh
+  aws autoscaling terminate-instance-in-auto-scaling-group \
+    --instance-id i-0123456789abcdef0 --no-should-decrement-desired-capacity
+  ```
+
+  or roll the whole fleet with
+  `aws autoscaling start-instance-refresh --auto-scaling-group-name <env>-tailscale-<tailnet>`.
 
 ## Development
 
