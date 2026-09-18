@@ -89,36 +89,6 @@ write_files:
       MaxAuthTries 3
       ClientAliveInterval 300
       ClientAliveCountMax 2
-{{- if .SSHUserCA }}
-
-  # SSH user certificates only (ssh.go). 10- wins: sshd keeps the first value.
-  - path: /etc/ssh/sshd_config.d/10-user-ca.conf
-    permissions: "0600"
-    content: |
-      PubkeyAuthentication yes
-      PasswordAuthentication no
-      KbdInteractiveAuthentication no
-      AuthorizedKeysFile none
-      TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pub
-      AuthorizedPrincipalsFile /etc/ssh/authorized_principals/%u
-      LogLevel VERBOSE
-
-  - path: /etc/ssh/trusted-user-ca-keys.pub
-    permissions: "0644"
-    content: |
-{{- range .SSHUserCA.TrustedUserCAKeys }}
-      {{ . }}
-{{- end }}
-{{- range .SSHUserCA.Principals }}
-
-  - path: /etc/ssh/authorized_principals/{{ .User }}
-    permissions: "0644"
-    content: |
-{{- range .Principals }}
-      {{ . }}
-{{- end }}
-{{- end }}
-{{- end }}
 
   # Nightly update + conditional reboot — ISO 27001 A.8.8
   # Runs daily at 00:00 UTC (01:00 CET / 02:00 CEST — Amsterdam night).
@@ -196,14 +166,14 @@ write_files:
       complete_hook() {
         TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
         INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-        aws ec2 modify-instance-attribute --instance-id "$INSTANCE_ID" --no-source-dest-check --region {{ .Region }} || true
+        aws ec2 modify-instance-attribute --instance-id "$INSTANCE_ID" --no-source-dest-check --region eu-west-1 || true
         # No-op (swallowed error) when no lifecycle action is pending.
         aws autoscaling complete-lifecycle-action \
-          --lifecycle-hook-name {{ .LifecycleHookName }} \
-          --auto-scaling-group-name {{ .ASGName }} \
+          --lifecycle-hook-name example-tailscale-acme-launch \
+          --auto-scaling-group-name example-tailscale-acme \
           --instance-id "$INSTANCE_ID" \
           --lifecycle-action-result CONTINUE \
-          --region {{ .Region }} || true
+          --region eu-west-1 || true
       }
 
       if [ -f "$MARKER" ]; then
@@ -221,8 +191,8 @@ write_files:
         fi
         if command -v tailscale >/dev/null 2>&1; then
           systemctl is-active -q tailscaled || systemctl enable --now tailscaled
-          AUTH_KEY=$(aws ssm get-parameter --name {{ .SSMAuthKeyPath }} --with-decryption --query Parameter.Value --output text --region {{ .Region }}) || AUTH_KEY=""
-          if [ -n "$AUTH_KEY" ] && tailscale up --authkey "$AUTH_KEY" --advertise-routes={{ .AdvertiseRoutes }} --accept-dns=false; then
+          AUTH_KEY=$(aws ssm get-parameter --name /tailscale/acme/auth-key --with-decryption --query Parameter.Value --output text --region eu-west-1) || AUTH_KEY=""
+          if [ -n "$AUTH_KEY" ] && tailscale up --authkey "$AUTH_KEY" --advertise-routes=10.0.0.0/16,10.1.0.0/16 --accept-dns=false; then
             complete_hook
             touch "$MARKER"
             echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') joined + hook completed"
@@ -299,17 +269,11 @@ runcmd:
 
   # ── Firewall ────────────────────────────────────────────────────
   - systemctl enable --now firewalld
-  - firewall-cmd --permanent --zone=public --add-interface={{ .PrimaryInterface }}
-  - firewall-cmd --permanent --zone=public --add-port={{ .WireGuardPort }}/udp
+  - firewall-cmd --permanent --zone=public --add-interface=ens5
+  - firewall-cmd --permanent --zone=public --add-port=41641/udp
   - firewall-cmd --permanent --zone=public --add-masquerade
   - firewall-cmd --permanent --zone=trusted --add-interface=tailscale0
-{{- if .SSHUserCA }}
-  - firewall-cmd --permanent --zone=public --remove-service=ssh
-{{- end }}
   - firewall-cmd --reload
-{{- if .SSHUserCA }}
-  - sshd -t
-{{- end }}
 
   # ── Tailscale join ──────────────────────────────────────────────
   # All join logic (install from signed repo, SSM auth key, tailscale up,
