@@ -1,9 +1,14 @@
 // Package awsrouter provisions the EC2 half of a tailnet: an
 // auto-scaling subnet router fleet — security group, IAM instance
-// profile (SSM-managed, no SSH), launch template with cloud-init
+// profile (SSM-managed, no SSH key), launch template with cloud-init
 // user data, and the ASG with an optional warm pool — reading its
 // tagged auth key from an SSM parameter the tailnet stack wrote
 // (pkg/tailnet NewRouterKey → the caller's SSM write).
+//
+// SSH is off by default: no key pair, no port in the security group.
+// A caller that sets TrustedUserCAKeys and AuthorizedPrincipals gets
+// sshd admitting OpenSSH user certificates from those CAs only, over
+// the tailnet interface — see ssh.go.
 //
 // This is the ONE deliberately cloud-specific package in the module:
 // everything else is provider-agnostic, an EC2 router is AWS by
@@ -84,6 +89,22 @@ type (
 		// attached as the router role's permissions boundary — an
 		// ESTATE convention, so it is an input. Empty: no boundary.
 		PermissionsBoundaryName string
+
+		// TrustedUserCAKeys are the OpenSSH user CA public keys sshd
+		// trusts, one authorized_keys-format line each ("ssh-ed25519
+		// AAAA..."). Two during a CA rotation, otherwise one. Empty (the
+		// default): no certificate login, and the user data renders
+		// exactly as it did before these inputs existed. Requires
+		// AuthorizedPrincipals.
+		TrustedUserCAKeys []string
+		// AuthorizedPrincipals maps a local login user to the
+		// certificate principals that may log in as it, written to
+		// /etc/ssh/authorized_principals/<user>. A certificate whose
+		// principals name none of them is refused, even when a trusted
+		// CA signed it; a user absent from the map accepts no
+		// certificate at all. root is refused (PermitRootLogin no).
+		// Requires TrustedUserCAKeys.
+		AuthorizedPrincipals map[string][]string
 	}
 
 	// TailscaleInstanceResult holds references to all created Tailscale instance resources.
@@ -96,13 +117,14 @@ type (
 
 	// userDataParams holds template parameters for the Tailscale instance user-data script.
 	userDataParams struct {
-		Region            string // AWS region for SSM and EC2 API calls
-		AdvertiseRoutes   string // Comma-separated VPC CIDRs for --advertise-routes
-		SSMAuthKeyPath    string // SSM parameter path for the auth key
-		WireGuardPort     int    // UDP port for Tailscale WireGuard
-		PrimaryInterface  string // Primary network interface (ens5 on AL2023)
-		ASGName           string // ASG name for lifecycle hook signal
-		LifecycleHookName string // Lifecycle hook name for readiness signal
+		Region            string           // AWS region for SSM and EC2 API calls
+		AdvertiseRoutes   string           // Comma-separated VPC CIDRs for --advertise-routes
+		SSMAuthKeyPath    string           // SSM parameter path for the auth key
+		WireGuardPort     int              // UDP port for Tailscale WireGuard
+		PrimaryInterface  string           // Primary network interface (ens5 on AL2023)
+		ASGName           string           // ASG name for lifecycle hook signal
+		LifecycleHookName string           // Lifecycle hook name for readiness signal
+		SSHUserCA         *sshUserCAParams // nil: no certificate login (default)
 	}
 )
 
@@ -132,6 +154,10 @@ func CreateTailscaleInstance(
 	config TailscaleInstanceConfig,
 ) (*TailscaleInstanceResult, error) {
 	ctx := c.Context()
+
+	if err := config.validateSSHUserCA(); err != nil {
+		return nil, err
+	}
 
 	logger.InfoContext(ctx, "creating Tailscale subnet router instance",
 		slog.String("environment", config.Environment),
@@ -491,6 +517,7 @@ func buildTailscaleUserData(config TailscaleInstanceConfig) string {
 		PrimaryInterface:  primaryInterface,
 		ASGName:           config.baseName(),
 		LifecycleHookName: config.baseName() + "-launch",
+		SSHUserCA:         config.sshUserCAParams(),
 	}); err != nil {
 		// Template is embedded and tested — panic is appropriate for a compile-time error.
 		panic(fmt.Sprintf("render tailscale user-data template: %v", err))

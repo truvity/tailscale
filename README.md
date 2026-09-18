@@ -8,7 +8,7 @@ Tailscale for Kubernetes estates, as reusable mechanism:
 | `charts/tsdns` | Split-DNS gateway — CoreDNS on a pinned ClusterIP serving `cluster.<name>` plus forwarded zones | shipped |
 | `pkg/acl` | Pure tailnet policy builder — tag ownership hierarchy, two access tiers, per-environment auto-approver isolation — from a neutral model; deterministic JSON out | shipped |
 | `pkg/tailnet` | Pulumi Go: the ACL resource (sole-owner semantics), router auth keys (ephemeral+tagged, rotation-by-name), split DNS, S3 flow logs, pinned service-IP helper | shipped |
-| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet — SG, SSM-only IAM profile (optional permissions boundary), launch template + user data, ASG with warm pool (the one cloud-specific package) | shipped |
+| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet — SG, SSM-only IAM profile (optional permissions boundary), launch template + user data, ASG with warm pool, optional SSH user-certificate login (the one cloud-specific package) | shipped |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag; the
 Go module is `github.com/truvity/tailscale`.
@@ -80,6 +80,50 @@ helm install tsdns oci://ghcr.io/truvity/charts/tsdns --version <tag> \
 Then add a Tailscale split-DNS nameserver for `<suffix>` → `<clusterIP>`,
 restricted to the cluster's router tag (`pkg/tailnet`'s NewSplitDNS +
 NewRouterKey are the Pulumi half of that wiring).
+
+## pkg/awsrouter: SSH user certificates
+
+Routers have no SSH by default: no key pair, no TCP port in the security
+group, SSM Session Manager as the console. Two optional inputs turn on
+OpenSSH **user certificate** login, reached over the tailnet:
+
+```go
+awsrouter.TailscaleInstanceConfig{
+    // ...
+    // The CA(s) whose certificates sshd accepts. List two while rotating.
+    TrustedUserCAKeys: []string{
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... example-user-ca",
+    },
+    // login user -> certificate principals that may log in as it.
+    AuthorizedPrincipals: map[string][]string{
+        "ec2-user": {"ec2-user"},
+    },
+}
+```
+
+| Input | Default | Notes |
+| --- | --- | --- |
+| `TrustedUserCAKeys` | empty (off) | one `authorized_keys`-format public key per entry, written to `/etc/ssh/trusted-user-ca-keys.pub` |
+| `AuthorizedPrincipals` | empty (off) | written to `/etc/ssh/authorized_principals/<user>`; a user absent from the map accepts no certificate; `root` is refused |
+
+Set both or neither. With both, sshd gets a `10-user-ca.conf` drop-in
+(`TrustedUserCAKeys`, `AuthorizedPrincipalsFile`, `AuthorizedKeysFile none`,
+`PasswordAuthentication no`, `LogLevel VERBOSE`, so every login logs the
+certificate's key id and serial), and SSH is removed from the primary
+interface's firewall zone: it arrives over `tailscale0` only, so the
+tailnet policy must let the people who hold certificates reach the
+router's tag on port 22. A certificate is refused when it is expired,
+when another CA signed it, or when none of its principals is listed for
+the login user.
+
+With neither set, the user data renders byte-for-byte as before these
+inputs existed (pinned by `pkg/awsrouter/testdata/userdata-default.yaml`),
+so upgrading the module replaces no router.
+
+**Rotating the CA:** add the new key next to the old one, roll the
+fleet (the launch template changes, and the ASG's instance refresh
+replaces the instances), move signing to the new CA, wait out the
+longest certificate lifetime, remove the old key, and roll again.
 
 ## Development
 
