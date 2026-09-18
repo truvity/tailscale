@@ -102,13 +102,23 @@ func writeFiles(t *testing.T, userData string) (map[string]string, []string) {
 	return files, cmds
 }
 
-// The default render is pinned byte-for-byte: testdata/userdata-default.yaml
-// was rendered by the code BEFORE the SSH inputs existed, so a router
-// that sets neither keeps its launch template (and its instances).
+// The default render is pinned byte-for-byte: any change to it is a new
+// launch template version, and the ASG's instance refresh replaces every
+// router. Change testdata/userdata-default.yaml only on purpose (the SSH
+// inputs left it untouched; the join log on the serial console did not).
 func TestUserDataDefaultUnchanged(t *testing.T) {
 	c := exampleConfig()
 	require.NoError(t, c.validateSSHUserCA())
 	assertGolden(t, "userdata-default.yaml", buildTailscaleUserData(c))
+}
+
+// The join is the one critical path; its log must reach the serial
+// console, the only diagnosis there is without a shell on the router.
+func TestUserDataJoinLogsToConsole(t *testing.T) {
+	files, _ := writeFiles(t, buildTailscaleUserData(exampleConfig()))
+
+	assert.Contains(t, files["/usr/local/sbin/tailscale-join.sh"], "exec > >(tee -a /var/log/tailscale-join.log) 2>&1")
+	assert.Contains(t, files["/etc/systemd/system/tailscale-join.service"], "StandardOutput=journal+console")
 }
 
 func TestUserDataDefaultHasNoCertificateLogin(t *testing.T) {
