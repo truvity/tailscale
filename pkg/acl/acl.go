@@ -23,9 +23,13 @@
 //     entry, every pod re-registration strands the route in "pending
 //     approval" (observed across four clusters at once).
 //
-// No `ssh` and no `groups` sections, deliberately: SSH access to
-// routers belongs to the cloud's own channel (SSM and the like), and
-// group membership comes exclusively from the tailnet's directory sync.
+// No `ssh` and no `groups` sections, deliberately. The `ssh` section
+// configures Tailscale SSH (tailscaled answering SSH itself); a router
+// that runs OpenSSH — pkg/awsrouter's optional certificate login — needs
+// only an ordinary rule to its tag on port 22, which the network router
+// rule above already carries for every VPC-tier group, and its
+// certificates decide who logs in. Group membership comes exclusively
+// from the tailnet's directory sync.
 package acl
 
 import (
