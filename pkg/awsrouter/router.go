@@ -407,7 +407,8 @@ func createTailscaleInstanceProfile(
 	// every parameter in the account (which, with kms-decrypt-ssm above,
 	// reads every default-key SecureString) and routers run no Session
 	// Manager shell. Break-glass is replacing the instance; diagnosis is
-	// the serial console output (README "Break-glass").
+	// the serial console output (docs/safety.md, "Routers: access,
+	// diagnosis and break-glass").
 
 	instanceProfile, err := iam.NewInstanceProfile(c, "tailscale-instance-profile", &iam.InstanceProfileArgs{
 		Name: pulumi.String(config.baseName()),

@@ -1,190 +1,210 @@
 # tailscale
 
-Tailscale for Kubernetes estates, as reusable mechanism:
+Tailscale for Kubernetes estates, as reusable mechanism: the subnet routers
+and the DNS gateway that put a cluster on a tailnet, and the tailnet's policy,
+keys and split DNS as code.
 
 | Artifact | What | Status |
-| --- | --- | --- |
-| `charts/tailscaled` | Subnet router — userspace `tailscaled` as a plain Deployment, advertising the CIDRs you name | shipped |
-| `charts/tsdns` | Split-DNS gateway — CoreDNS on a pinned ClusterIP serving `cluster.<name>` plus forwarded zones | shipped |
-| `pkg/acl` | Pure tailnet policy builder — tag ownership hierarchy, two access tiers, per-environment auto-approver isolation — from a neutral model; deterministic JSON out | shipped |
-| `pkg/tailnet` | Pulumi Go: the ACL resource (sole-owner semantics), router auth keys (ephemeral+tagged, rotation-by-name), split DNS, S3 flow logs, pinned service-IP helper | shipped |
-| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet — SG, least-privilege IAM profile (optional permissions boundary), launch template + user data, ASG with warm pool, optional SSH user-certificate login (the one cloud-specific package) | shipped |
+|---|---|---|
+| `charts/tailscaled` | Subnet router: userspace `tailscaled` as a plain Deployment, advertising the CIDRs you name | shipped |
+| `charts/tsdns` | Split-DNS gateway: CoreDNS on a pinned ClusterIP serving a tailnet-only suffix, plus forwarded zones | shipped |
+| `pkg/acl` | Pure tailnet policy builder: tag ownership, two access tiers, per-environment route auto-approval, from a neutral model; deterministic JSON out | shipped |
+| `pkg/tailnet` | Pulumi Go: the policy resource (sole owner), router auth keys (ephemeral, tagged, rotated by name), split DNS, S3 flow logs, a pinned service-IP helper | shipped |
+| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet (security group, least-privilege role, launch template, ASG with optional warm pool), optional SSH user-certificate login; the one cloud-specific package | shipped |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag; the
 Go module is `github.com/truvity/tailscale`.
 
-## The rule that makes this repository public
+## Who it is for
 
-**Mechanism only.** Nothing here names a tailnet, a cluster, a CIDR or a
-secret path — every such thing is an input with a neutral default, and
-the consuming estate supplies it from its own (private) repository.
-`hack/leak-canary.sh` enforces this in CI; public history cannot be
-unpublished, so the rule is mechanical, not remembered.
+A platform team that runs Kubernetes and a Tailscale tailnet, and wants the
+cluster's Services and its network reachable, and nameable, from the tailnet,
+with who-reaches-what stated as data. It assumes a tailnet whose groups come
+from its own directory sync, an OAuth client for the Tailscale Pulumi
+provider, somewhere the estate keeps secrets, and, for `pkg/awsrouter`, an AWS
+VPC with public subnets. The charts need nothing beyond Kubernetes: no
+operator, no CRDs, no `NET_ADMIN`.
 
-The same rule shapes the Go packages: credentials come in as a
-provider, keys go out as Pulumi `Output`s and the **caller** stores them.
-Everything is cloud-agnostic except `pkg/awsrouter`, which is AWS by
-definition.
+It deliberately does not install the Tailscale Kubernetes operator, the
+OAuth client, a secret store, the VPC, or any NetworkPolicy. Keys leave the
+Go packages as Pulumi Outputs and the caller stores them.
 
-This repository follows the shared
-[component contract](https://github.com/truvity/ci-workflows/blob/master/docs/component-contract.md).
+## The model
 
-## How the two charts fit together
+A **router** is a tailnet node that advertises routes: the EC2 fleet
+(`pkg/awsrouter`) carries a network's VPC CIDR, and a cluster's own router
+(`charts/tailscaled`) carries its Service CIDR. Each router has a **tag**, and
+the **policy** (`pkg/acl`) says which directory groups reach which CIDRs,
+which tag owns which, and which tag may advertise which route without a
+person approving it. **Keys** (`pkg/tailnet`) are minted per tag after the
+policy exists. The **DNS gateway** (`charts/tsdns`) makes the Services
+nameable under a suffix that exists only on the tailnet.
 
 ```
 tailnet client ──(split DNS: cluster.<name> → tsdns ClusterIP)──▶ tsdns ──▶ cluster resolver
        │
-       └──(routes: service CIDR, node CIDR)──▶ tailscaled subnet router ──▶ Services / nodes
+       ├──(route: Service CIDR)──▶ tailscaled (in the cluster) ──▶ Services
+       └──(route: VPC CIDR)──────▶ EC2 router fleet ─────────────▶ nodes, VPC endpoints
 ```
 
-`tailscaled` makes the cluster's CIDRs reachable; `tsdns` makes them
-*nameable* — `foo.bar.svc.cluster.<name>` resolves over the tailnet to a
-Service the router carries you to. The suffix is deliberately not the
-cluster domain: those names resolve only over the tailnet, and two
-clusters never collide.
+`foo.bar.svc.cluster.<name>` resolves over the tailnet to a Service address
+the cluster's router carries you to. The suffix is deliberately not the
+cluster domain: those names resolve only over the tailnet, and two clusters
+never collide.
 
-## charts/tailscaled
+## Install and a worked example
 
-```sh
-helm install tailscaled oci://ghcr.io/truvity/charts/tailscaled --version <tag> \
-  --namespace tailscale-router --create-namespace \
-  --set advertiseRoutes="172.20.0.0/16,10.0.0.0/16" --set hostname=k8s-mycluster-router
-```
-
-| Value | Default | Notes |
-| --- | --- | --- |
-| `advertiseRoutes` | `""` | comma-separated CIDRs; auto-approve them in the tailnet policy for the router's tag |
-| `hostname` | `""` | the router's tailnet name |
-| `secretName` / `secretKey` | `tailscaled-auth-key` / `auth-key` | a reusable, pre-authorized, tagged auth key; the Secret is yours to create |
-| `extraArgs` | `""` | appended to `TS_EXTRA_ARGS` |
-| `replicaCount` | `2` | each replica is its own ephemeral tailnet node (no state write-back, no RBAC) |
-| scheduling (`nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`, `priorityClassName`) | empty | the estate's |
-
-Userspace networking (`TS_USERSPACE=true`): no `NET_ADMIN`, no tun device,
-works on any CNI. Traffic for advertised routes is proxied by the process.
-
-## charts/tsdns
-
-```sh
-helm install tsdns oci://ghcr.io/truvity/charts/tsdns --version <tag> \
-  --namespace tailscale-dns-system --create-namespace \
-  --set suffix=cluster.mycluster --set clusterIP=172.20.0.53 --set resolverIP=172.20.0.10
-```
-
-| Value | Default | Notes |
-| --- | --- | --- |
-| `suffix` | required | the tailnet-only name space, e.g. `cluster.mycluster` |
-| `clusterIP` | required | pinned, inside the Service CIDR — the split-DNS entry names it |
-| `resolverIP` | required | the in-cluster resolver the suffix is forwarded to |
-| `clusterDomain` | `cluster.local` | rewrite target |
-| `forwardZones` | `[]` | `[{zone, resolver}]` — zones the gateway can resolve but tailnet clients cannot (a private cloud API endpoint zone) |
-| `image.repository` / `image.tag` | `registry.k8s.io/coredns/coredns` / pinned | point `repository` at a pull-through cache if the gateway must not depend on the internet |
-
-Then add a Tailscale split-DNS nameserver for `<suffix>` → `<clusterIP>`,
-restricted to the cluster's router tag (`pkg/tailnet`'s NewSplitDNS +
-NewRouterKey are the Pulumi half of that wiring).
-
-## pkg/awsrouter: SSH user certificates
-
-Routers have no SSH by default: no key pair, no TCP port in the security
-group, and no other shell either (see [Break-glass](#pkgawsrouter-break-glass)).
-Two optional inputs turn on
-OpenSSH **user certificate** login, reached over the tailnet:
+The tailnet side, in a Pulumi Go program (`go get github.com/truvity/tailscale@<tag>`):
 
 ```go
-awsrouter.TailscaleInstanceConfig{
-    // ...
-    // The CA(s) whose certificates sshd accepts. List two while rotating.
-    TrustedUserCAKeys: []string{
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... example-user-ca",
-    },
-    // login user -> certificate principals that may log in as it.
-    AuthorizedPrincipals: map[string][]string{
-        "ec2-user": {"ec2-user"},
-    },
+package main
+
+import (
+	"time"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+
+	"github.com/truvity/tailscale/pkg/acl"
+	"github.com/truvity/tailscale/pkg/tailnet"
+)
+
+func main() {
+	pulumi.Run(func(ctx *pulumi.Context) error {
+		// The whole tailnet policy, from a model: one network with an EC2
+		// router, one cluster with its own router.
+		doc, err := acl.Build(acl.Policy{
+			Networks: []acl.Network{
+				{Name: "example", VPCCIDR: "10.0.0.0/16", RouterTag: "example-router"},
+			},
+			Clusters: []acl.Cluster{{
+				Name:            "example", // router tag: k8s-example-router
+				Network:         "example",
+				ServiceCIDR:     "172.20.0.0/16",
+				Member:          true,
+				VPCGroups:       []string{"engineering@example.com"},
+				InClusterGroups: []string{"operators@example.com"},
+			}},
+		})
+		if err != nil {
+			return err
+		}
+
+		policy, err := tailnet.NewACL(ctx, "tailnet-policy", doc)
+		if err != nil {
+			return err
+		}
+
+		// Rotation is the name: next month's apply mints a new key.
+		key, err := tailnet.NewRouterKey(ctx,
+			"k8s-example-router-"+tailnet.RotationSuffix(time.Now()),
+			tailnet.RouterKeyArgs{Tag: "tag:k8s-example-router"},
+			pulumi.DependsOn([]pulumi.Resource{policy}))
+		if err != nil {
+			return err
+		}
+
+		// A secret Output: store it wherever the estate keeps secrets, as
+		// the Secret the tailscaled chart reads.
+		ctx.Export("k8sRouterAuthKey", key.Key)
+
+		// tsdns's pinned address: .0.53 of the Service CIDR.
+		dnsIP, err := tailnet.ServiceIP("172.20.0.0/16", 53)
+		if err != nil {
+			return err
+		}
+
+		return tailnet.NewSplitDNS(ctx, "split-dns-example", "cluster.example", dnsIP)
+	})
 }
 ```
 
-| Input | Default | Notes |
-| --- | --- | --- |
-| `TrustedUserCAKeys` | empty (off) | one `authorized_keys`-format public key per entry, written to `/etc/ssh/trusted-user-ca-keys.pub` |
-| `AuthorizedPrincipals` | empty (off) | written to `/etc/ssh/authorized_principals/<user>`; a user absent from the map accepts no certificate; `root` is refused |
+The cluster side, once the key is in a Secret named `tailscaled-auth-key`
+(key `auth-key`) in the router's namespace:
 
-Set both or neither. With both, sshd gets a `10-user-ca.conf` drop-in
-(`TrustedUserCAKeys`, `AuthorizedPrincipalsFile`, `AuthorizedKeysFile none`,
-`PasswordAuthentication no`, `LogLevel VERBOSE`, so every login logs the
-certificate's key id and serial), and SSH is removed from the primary
-interface's firewall zone: it arrives over `tailscale0` only, so the
-tailnet policy must let the people who hold certificates reach the
-router's tag on port 22. A certificate is refused when it is expired,
-when another CA signed it, or when none of its principals is listed for
-the login user.
+```sh
+helm install tailscaled oci://ghcr.io/truvity/charts/tailscaled --version <tag> \
+  --namespace tailscale-router --values tailscaled-values.yaml
+helm install tsdns oci://ghcr.io/truvity/charts/tsdns --version <tag> \
+  --namespace tailscale-dns-system --values tsdns-values.yaml
+```
 
-With neither set, the SSH inputs add nothing to the user data (the
-default render is pinned by `pkg/awsrouter/testdata/userdata-default.yaml`;
-a change to it is a new launch template version, which the instance
-refresh rolls through the fleet).
+```yaml
+# tailscaled-values.yaml
+# Both CIDRs: the policy above auto-approves them for tag:k8s-example-router.
+advertiseRoutes: "172.20.0.0/16,10.0.0.0/16"
+hostname: k8s-example-router
+```
 
-**Rotating the CA:** add the new key next to the old one, roll the
-fleet (the launch template changes, and the ASG's instance refresh
-replaces the instances), move signing to the new CA, wait out the
-longest certificate lifetime, remove the old key, and roll again.
+```yaml
+# tsdns-values.yaml
+suffix: cluster.example
+clusterIP: 172.20.0.53     # the split-DNS entry above names it
+resolverIP: 172.20.0.10    # the cluster's own resolver
+```
 
-## pkg/awsrouter: break-glass
+A client in `operators@example.com` now resolves
+`foo.bar.svc.cluster.example` and reaches the Service. The EC2 router fleet
+for the VPC CIDR is the same pattern with `pkg/awsrouter`;
+[docs/reference.md](docs/reference.md#pkgawsrouter) has the worked example.
 
-A router has no interactive access unless the SSH inputs above are set:
-no SSM Session Manager (the instance role carries no
-`AmazonSSMManagedInstanceCore`, which would also grant `ssm:GetParameter`
-on every parameter in the account), no key pair. A router is cattle:
+## Documentation
 
-- **Diagnose** from the serial console, no shell needed. cloud-init and
-  the join script (`/usr/local/sbin/tailscale-join.sh`, which installs
-  Tailscale, reads the auth key, runs `tailscale up` and completes the
-  lifecycle hook) both write there:
+- [docs/adoption.md](docs/adoption.md) — prerequisites, install order,
+  adopting a tailnet and routers that already exist, the zero-diff gate, and
+  what each upgrade changes
+- [docs/safety.md](docs/safety.md) — every refusal and the failure it
+  prevents, the defaults that replaced ones that failed, router break-glass
+  and diagnosis
+- [docs/reference.md](docs/reference.md) — every chart value, every Go input
+  and output
+- [docs/doctrine.md](docs/doctrine.md) — what this repository owns and what
+  the consuming estate owns, and why the pieces are shaped as they are
+- [CHANGELOG.md](CHANGELOG.md) — what changed for a consumer, per version
 
-  ```sh
-  aws ec2 get-console-output --latest --output text --instance-id i-0123456789abcdef0
-  ```
+## The rule that makes this repository public
 
-- **Repair** by replacing it. The ASG launches a fresh router (from the
-  warm pool when there is one) and the launch lifecycle hook keeps it out
-  of service until it has joined:
+**Mechanism only.** Nothing here names a tailnet, a cluster, an account, a
+CIDR or a secret path. Every such thing is an input with a neutral default,
+and the consuming estate supplies it from its own (private) repository.
+`hack/leak-canary.sh` enforces this in CI, and public history cannot be
+unpublished, so the rule is mechanical, not remembered.
 
-  ```sh
-  aws autoscaling terminate-instance-in-auto-scaling-group \
-    --instance-id i-0123456789abcdef0 --no-should-decrement-desired-capacity
-  ```
+The same rule shapes the Go packages: credentials come in as a provider,
+keys go out as Pulumi Outputs and the **caller** stores them. Everything is
+cloud-agnostic except `pkg/awsrouter`, which is AWS by definition.
 
-  or roll the whole fleet with
-  `aws autoscaling start-instance-refresh --auto-scaling-group-name <env>-tailscale-<tailnet>`.
+This repository follows the shared
+[component contract](https://github.com/truvity/ci-workflows/blob/master/docs/component-contract.md).
+
+## Status
+
+Used in production by its maintainers. Releases are listed on the
+[releases page](https://github.com/truvity/tailscale/releases).
 
 ## Development
 
 ```sh
 devbox shell        # or direnv
-just check          # lint + golden renders + leak canary + go build/vuln
+just check          # build + lint + golden renders and Go tests + leak canary + govulncheck
 just golden         # regenerate tests/golden after a template change — review the diff
+UPDATE_GOLDEN=1 go test ./pkg/awsrouter/   # regenerate the router user-data goldens
 ```
 
-Every `tests/cases/<chart>/<case>/values.yaml` is rendered and compared
-byte-for-byte with `tests/golden/<chart>/<case>.yaml`.
+`just --list` shows the rest (`fmt`, `tidy`, `package`, and each part of
+`check` on its own). Every `tests/cases/<chart>/<case>/values.yaml` is
+rendered and compared byte-for-byte with `tests/golden/<chart>/<case>.yaml`;
+the router's cloud-init user data is pinned the same way under
+`pkg/awsrouter/testdata/`.
 
 `tests/invalid/<chart>/` holds one fixture per refusal. Each must fail to
-render; `just lint` proves it. A rule without a fixture is a rule that
-will quietly stop working.
-
-## Status
-
-Used in production by its maintainers. Releases are listed on the
-[releases page](https://github.com/truvity/tailscale/releases), and
-[CHANGELOG.md](CHANGELOG.md) says what changed for a consumer in each.
+render; `just lint` proves it. A rule without a fixture is a rule that will
+quietly stop working.
 
 ## Releasing
 
-Push a tag `vX.Y.Z`. The shared release workflow creates the GitHub
-Release and pushes both charts at that version — a chart's own `version`
-field is a placeholder that never moves — and the same tag is the Go
-module's version.
+Push a tag `vX.Y.Z`. The shared release workflow creates the GitHub Release
+and pushes both charts at that version — a chart's own `version` field is a
+placeholder that never moves — and the same tag is the Go module's version.
 
 Auto-release is present but not armed (`vars.AUTO_RELEASE` is unset), so
 every release today is a manual tag. When armed it cuts **patches only**:
