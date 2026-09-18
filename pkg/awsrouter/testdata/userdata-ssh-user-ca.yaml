@@ -189,7 +189,9 @@ write_files:
       # stopped instance starts into service — completion must run every boot.
       set -uo pipefail
       MARKER=/var/lib/tailscale-join.done
-      exec >> /var/log/tailscale-join.log 2>&1
+      # Log file AND stdout: both callers send stdout to the serial console,
+      # so `aws ec2 get-console-output` shows a join failing without a shell.
+      exec > >(tee -a /var/log/tailscale-join.log) 2>&1
       echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') tailscale-join boot pass (marker: $([ -f $MARKER ] && echo present || echo absent))"
 
       complete_hook() {
@@ -260,6 +262,7 @@ write_files:
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/tailscale-join.sh
+      StandardOutput=journal+console
       TimeoutStartSec=900
       RemainAfterExit=yes
 
