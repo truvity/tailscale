@@ -1,0 +1,6 @@
+# A forward zone needs somewhere to forward to.
+suffix: cluster.example
+clusterIP: 172.20.0.53
+resolverIP: 172.20.0.10
+forwardZones:
+  - zone: internal.example

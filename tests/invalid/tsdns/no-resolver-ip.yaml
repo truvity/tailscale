@@ -1,0 +1,3 @@
+# Without an upstream resolver nothing outside the suffix is answered.
+suffix: cluster.example
+clusterIP: 172.20.0.53
