@@ -2,7 +2,7 @@
 // auto-scaling subnet router fleet — security group, IAM instance
 // profile (least privilege, no SSH key), launch template with cloud-init
 // user data, and the ASG with an optional warm pool — reading its
-// tagged auth key from an SSM parameter the tailnet stack wrote
+// tagged auth key from an SSM parameter the caller wrote
 // (pkg/tailnet NewRouterKey → the caller's SSM write).
 //
 // SSH is off by default: no key pair, no port in the security group.
@@ -16,7 +16,7 @@
 // This is the ONE deliberately cloud-specific package in the module:
 // everything else is provider-agnostic, an EC2 router is AWS by
 // definition. Resource names derive from "{environment}-tailscale-
-// {tailnet}", keyed by tailnet because two companies' fleets can share
+// {tailnet}", keyed by tailnet because two tailnets' fleets can share
 // one VPC and AWS names are account-namespaced.
 package awsrouter
 
@@ -81,12 +81,13 @@ type (
 		Max           int               // ASG MaxSize (default desired+1 if 0)
 		WarmPool      bool              // Enable warm pool (size = desired)
 
-		// Tailnet is the company tailnet slug this router joins
-		// (ADR-029). Required: every fleet is company-keyed, so two
-		// companies' routers can share a VPC without colliding.
+		// Tailnet is the slug of the tailnet this router joins.
+		// Required: every fleet is keyed by its tailnet, so routers of
+		// two tailnets can share a VPC without colliding.
 		Tailnet string
 		// SSMAuthKeyPath is the auth-key parameter this fleet reads at
-		// boot, written by the tailnet's tailscale-{company} stack.
+		// boot, written by the caller that mints the tailnet's router
+		// key (pkg/tailnet NewRouterKey).
 		SSMAuthKeyPath string
 		// PermissionsBoundaryName is the account-local IAM policy name
 		// attached as the router role's permissions boundary — an
@@ -142,8 +143,9 @@ func boundaryPtr(arn string) pulumi.StringPtrInput {
 }
 
 // baseName is the AWS-visible name stem. These live in one shared AWS
-// account namespace — two companies' fleets in the same VPC cannot both
-// own the security group "devel-tailscale" — so every fleet is keyed.
+// account namespace — two tailnets' fleets in the same VPC cannot both
+// own the security group "<environment>-tailscale" — so every fleet is
+// keyed.
 func (c TailscaleInstanceConfig) baseName() string {
 	return fmt.Sprintf("%s-tailscale-%s", c.Environment, c.Tailnet)
 }
@@ -635,10 +637,12 @@ func createTailscaleASG(
 		return nil, fmt.Errorf("create Tailscale ASG lifecycle hook: %w", err)
 	}
 
-	// CloudWatch alarms — Vanta compliance (Server CPU monitored) + instance health.
-	// Temporary: will be replaced by VictoriaMetrics alerting (Phase 21+, INF-184).
-	// TODO(INF-184): Add AlarmActions — SNS topics exist in root account (guardduty stack)
-	// but cross-account alarm→SNS requires additional IAM setup. Defer to obs stack migration.
+	// CloudWatch alarms: sustained high CPU and a failed instance status
+	// check, so the router's CPU and health are monitored where AWS
+	// records them. They carry no AlarmActions: where an alarm notifies
+	// is the caller's decision, and an SNS topic in another account needs
+	// cross-account IAM this module does not own. A caller routes them
+	// from CloudWatch (or replaces them with its own alerting).
 	_, err = cloudwatch.NewMetricAlarm(c, "tailscale-cpu-alarm", &cloudwatch.MetricAlarmArgs{
 		Name:               pulumi.String(config.baseName() + "-cpu-high"),
 		ComparisonOperator: pulumi.String("GreaterThanThreshold"),

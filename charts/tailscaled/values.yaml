@@ -44,8 +44,8 @@ topologySpreadConstraints: []
 # static. Idle sits around 20-45Mi; the old 128Mi ceiling left no room
 # for a burst, and a router in front of churning backends (pods moving,
 # the client re-dialling each one) OOMKilled repeatedly at 128Mi while
-# reporting 44Mi steady-state -- observed on truvity devel, 16 restarts
-# in 4h. There is deliberately no cpu limit: throttling a router adds
+# reporting 44Mi steady-state -- 16 restarts in 4h on one busy
+# cluster. There is deliberately no cpu limit: throttling a router adds
 # latency to every packet instead of shedding one pod.
 resources:
   requests:
