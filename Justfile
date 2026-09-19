@@ -14,8 +14,16 @@ lint:
     set -euo pipefail
     helm lint charts/tailscaled
     helm lint charts/tsdns -f tests/cases/tsdns/minimal/values.yaml
-    ! helm template tailscaled charts/tailscaled --set bogusKey=1 >/dev/null 2>&1
-    ! helm template tsdns charts/tsdns >/dev/null 2>&1
+    # Not `! helm template ...`: bash's `set -e` ignores a command negated
+    # with `!`, so such a probe could never fail the recipe.
+    if helm template tailscaled charts/tailscaled --set bogusKey=1 >/dev/null 2>&1; then
+      echo "tailscaled: an unknown key rendered" >&2
+      exit 1
+    fi
+    if helm template tsdns charts/tsdns >/dev/null 2>&1; then
+      echo "tsdns: rendered without its required values" >&2
+      exit 1
+    fi
     for chart in {{ charts }}; do
       for values in tests/invalid/"$chart"/*.yaml; do
         if helm template invalid "charts/$chart" -f "$values" >/dev/null 2>&1; then
