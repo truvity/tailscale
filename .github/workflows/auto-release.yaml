@@ -1,11 +1,11 @@
-# The chain's last mile (INF-590): when renovate's automerged bumps
-# have moved master past the latest release, the shared workflow cuts
-# the next patch tag. DOUBLY GUARDED, off by default: the issuer must be
+# The chain's last mile: when renovate's automerged bumps have moved
+# master past the latest release, the shared workflow cuts the next
+# patch tag. DOUBLY GUARDED, off by default: the issuer must be
 # configured for the organisation AND vars.AUTO_RELEASE must be "true"
 # — flipping it is the deliberate policy act. The v* tag ruleset must
-# carry the tagging App's bypass (gitops cfg/github.yaml) or the push is
-# rejected. Cron staggered per repo so Monday's releases don't race each
-# other's gitops pin PRs.
+# carry the tagging App's bypass or the push is rejected. Cron staggered
+# per repo so Monday's releases don't race each other's downstream pin
+# updates.
 #
 # NO APP KEY HERE. The job exchanges its own GitHub identity token at the
 # access-roster issuer for an installation token of the catalogue App,
