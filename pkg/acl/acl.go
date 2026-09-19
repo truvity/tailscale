@@ -2,7 +2,7 @@
 // neutral model — pure data in, deterministic JSON out, no Tailscale
 // SDK, no cloud, no config-file opinions.
 //
-// The model it encodes (proven in a multi-company production estate):
+// The model it encodes:
 //
 //   - One MANAGER TAG (default "infra-manager") owns every router tag.
 //     The tailnet's OAuth credential is scoped to the manager tag alone,
