@@ -22,6 +22,12 @@
 //     CIDR they advertise alongside the Service CIDR. Without that
 //     entry, every pod re-registration strands the route in "pending
 //     approval" (observed across four clusters at once).
+//   - Policy.ExtraGrants is the one escape hatch: a single tag-to-tag
+//     accept rule on a spelled-out port list, for access that is neither
+//     a VPC/Service-CIDR tier nor a router's own reachability — an
+//     application box outside every cluster that one cluster's egress
+//     identity needs to reach on one port, say. It stays this narrow on
+//     purpose: see Grant's own doc comment.
 //
 // No `ssh` and no `groups` sections, deliberately. The `ssh` section
 // configures Tailscale SSH (tailscaled answering SSH itself); a router
@@ -36,6 +42,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 const (
@@ -85,6 +92,30 @@ type (
 		InClusterGroups []string `json:"inClusterGroups,omitempty" yaml:"inClusterGroups,omitempty"`
 	}
 
+	// Grant is one explicit, narrow accept rule between two tags — the
+	// escape hatch for access that does not fit the network/cluster
+	// model above: a single application on one side, a specific port
+	// list on the other, neither a VPC CIDR nor a Service CIDR. Ports is
+	// required and deliberately not "*": a Grant that admits a whole tag
+	// rather than a small, spelled-out port list is exactly the blast
+	// radius this type exists to avoid, so Validate refuses an empty
+	// list rather than defaulting it to everything.
+	//
+	// This is deliberately the ONLY shape ExtraGrants accepts — one tag
+	// to one tag, ports only, no groups, no autogroups, no CIDRs. A need
+	// that does not fit even this (a source that is a group, a
+	// destination that is a CIDR) is a sign the model itself needs a new
+	// concept, not that this escape hatch should grow another field.
+	Grant struct {
+		// SrcTag and DstTag are tag names without the "tag:" prefix.
+		SrcTag string `json:"srcTag" yaml:"srcTag"`
+		DstTag string `json:"dstTag" yaml:"dstTag"`
+		// Ports the rule admits on DstTag, e.g. []string{"9092"}. Every
+		// entry is rendered into one comma-joined dst ("tag:x:9092,9093"),
+		// the ACL policy's own way of listing several ports on one line.
+		Ports []string `json:"ports" yaml:"ports"`
+	}
+
 	// Policy is the whole tailnet's input model. Plain data,
 	// yaml/json-taggable.
 	Policy struct {
@@ -97,6 +128,11 @@ type (
 		Networks []Network `json:"networks" yaml:"networks"`
 		// Clusters, members and non-members alike (see Cluster.Member).
 		Clusters []Cluster `json:"clusters" yaml:"clusters"`
+		// ExtraGrants are one-off tag-to-tag accept rules the
+		// network/cluster model above cannot express — see Grant's own
+		// doc comment for why this stays narrow. Rendered after every
+		// rule the model derives, in the order given.
+		ExtraGrants []Grant `json:"extraGrants,omitempty" yaml:"extraGrants,omitempty"`
 	}
 
 	policyDoc struct {
@@ -158,6 +194,19 @@ func (p *Policy) Validate() error {
 		}
 	}
 
+	for _, g := range p.ExtraGrants {
+		if g.SrcTag == "" || g.DstTag == "" {
+			return fmt.Errorf("acl: extra grant %+v needs srcTag and dstTag", g)
+		}
+
+		if len(g.Ports) == 0 {
+			return fmt.Errorf("acl: extra grant %s -> %s has no ports: "+
+				"a Grant admitting a whole tag with no port list is exactly "+
+				"the blast radius this type exists to avoid, so it is "+
+				"refused rather than defaulted to everything", g.SrcTag, g.DstTag)
+		}
+	}
+
 	return nil
 }
 
@@ -186,7 +235,7 @@ func Build(p Policy) (string, error) {
 
 	doc := policyDoc{
 		TagOwners:     tagOwners(manager, p.ExtraTagOwners, networks, clusters),
-		ACLs:          rules(networks, clusters, netByName),
+		ACLs:          append(rules(networks, clusters, netByName), grantRules(p.ExtraGrants)...),
 		AutoApprovers: approvers(networks, clusters, netByName),
 	}
 
@@ -307,6 +356,28 @@ func rules(networks []Network, clusters []Cluster, netByName map[string]*Network
 		}
 
 		out = append(out, rule{Action: accept, Src: []string{tag}, Dst: []string{"autogroup:member:*"}})
+	}
+
+	return out
+}
+
+// grantRules renders each ExtraGrant as one rule: a single tag source, a
+// single tag destination restricted to that Grant's own port list. Order
+// is preserved (not sorted) so a caller's own ordering — the only thing
+// about ExtraGrants this package does not otherwise normalize — is
+// exactly what ends up in the rendered policy; determinism instead comes
+// from the caller building the slice in a stable order, the same
+// responsibility Policy.Networks and Policy.Clusters already have before
+// Build sorts them.
+func grantRules(grants []Grant) []rule {
+	out := make([]rule, 0, len(grants))
+
+	for _, g := range grants {
+		out = append(out, rule{
+			Action: accept,
+			Src:    []string{"tag:" + g.SrcTag},
+			Dst:    []string{"tag:" + g.DstTag + ":" + strings.Join(g.Ports, ",")},
+		})
 	}
 
 	return out
