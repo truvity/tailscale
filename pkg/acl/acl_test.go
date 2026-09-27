@@ -250,6 +250,119 @@ func TestExtraGrantsValidateRefusesAMissingTag(t *testing.T) {
 	}
 }
 
+func TestExtraCIDRGrantsRenderNarrowRules(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraCIDRGrants = []CIDRGrant{
+		{SrcTag: "statusbox", DstCIDR: "172.20.0.20/32", Ports: []string{"443"}},
+	}
+
+	_, doc := build(t, p)
+
+	var found *rule
+
+	for i, r := range doc.ACLs {
+		if len(r.Src) == 1 && r.Src[0] == "tag:statusbox" && len(r.Dst) == 1 && r.Dst[0] == "172.20.0.20/32:443" {
+			found = &doc.ACLs[i]
+		}
+	}
+
+	require.NotNil(t, found, "no rule matched tag:statusbox -> 172.20.0.20/32:443 in %+v", doc.ACLs)
+	assert.Equal(t, accept, found.Action)
+
+	// Same as Grant: introduces no tagOwners entry of its own.
+	assert.NotContains(t, doc.TagOwners, "tag:statusbox")
+}
+
+func TestExtraCIDRGrantsJoinMultiplePorts(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraCIDRGrants = []CIDRGrant{
+		{SrcTag: "statusbox", DstCIDR: "172.20.0.20/32", Ports: []string{"443", "8443"}},
+	}
+
+	_, doc := build(t, p)
+
+	var dsts []string
+	for _, r := range doc.ACLs {
+		if len(r.Src) == 1 && r.Src[0] == "tag:statusbox" {
+			dsts = append(dsts, r.Dst...)
+		}
+	}
+
+	assert.Contains(t, dsts, "172.20.0.20/32:443,8443")
+}
+
+func TestExtraCIDRGrantsPreserveDeclarationOrder(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraCIDRGrants = []CIDRGrant{
+		{SrcTag: "a", DstCIDR: "10.0.0.1/32", Ports: []string{"1"}},
+		{SrcTag: "c", DstCIDR: "10.0.0.2/32", Ports: []string{"2"}},
+	}
+
+	_, doc := build(t, p)
+
+	n := len(doc.ACLs)
+	require.GreaterOrEqual(t, n, 2)
+	assert.Equal(t, []string{"tag:a"}, doc.ACLs[n-2].Src)
+	assert.Equal(t, []string{"tag:c"}, doc.ACLs[n-1].Src)
+}
+
+func TestExtraCIDRGrantsValidateRefusesAnEmptyPortList(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraCIDRGrants = []CIDRGrant{{SrcTag: "a", DstCIDR: "10.0.0.1/32"}}
+
+	err := p.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no ports")
+}
+
+func TestExtraCIDRGrantsValidateRefusesAMissingField(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		g    CIDRGrant
+	}{
+		{"no srcTag", CIDRGrant{DstCIDR: "10.0.0.1/32", Ports: []string{"1"}}},
+		{"no dstCidr", CIDRGrant{SrcTag: "a", Ports: []string{"1"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := examplePolicy()
+			p.ExtraCIDRGrants = []CIDRGrant{tc.g}
+			err := p.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "needs srcTag and dstCidr")
+		})
+	}
+}
+
+// ExtraGrants and ExtraCIDRGrants coexist without interfering: each is
+// rendered, in its own declared order, after every rule the
+// network/cluster model derives.
+func TestExtraGrantsAndExtraCIDRGrantsCoexist(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraGrants = []Grant{
+		{SrcTag: "k8s-devel-router", DstTag: "example", Ports: []string{"9092"}},
+	}
+	p.ExtraCIDRGrants = []CIDRGrant{
+		{SrcTag: "statusbox", DstCIDR: "172.20.0.20/32", Ports: []string{"443"}},
+	}
+
+	_, doc := build(t, p)
+
+	var sawTag, sawCIDR bool
+
+	for _, r := range doc.ACLs {
+		if len(r.Dst) == 1 && r.Dst[0] == "tag:example:9092" {
+			sawTag = true
+		}
+
+		if len(r.Dst) == 1 && r.Dst[0] == "172.20.0.20/32:443" {
+			sawCIDR = true
+		}
+	}
+
+	assert.True(t, sawTag, "Grant rule missing from %+v", doc.ACLs)
+	assert.True(t, sawCIDR, "CIDRGrant rule missing from %+v", doc.ACLs)
+}
+
 func TestManagerTagDefaultAndOverride(t *testing.T) {
 	_, doc := build(t, examplePolicy())
 	assert.Contains(t, doc.TagOwners, "tag:infra-manager")

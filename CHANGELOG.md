@@ -5,6 +5,21 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. Both charts and the Go module are released
 together at every version.
 
+## v1.9.0
+
+- **New: `pkg/acl`'s `Policy.ExtraCIDRGrants` / `CIDRGrant`** — `Grant`'s
+  sibling escape hatch for the one shape its own doc comment names and
+  refuses to grow into: a destination that is an address rather than a
+  tag. A tagged device reaching one address behind a subnet router (a
+  private gateway's pinned ClusterIP, rather than the whole VPC CIDR the
+  router already advertises) carries no tag of its own for a `Grant` to
+  name, and is neither a VPC/Service-CIDR tier (those are GROUP-sourced)
+  nor a router's own reachability rule. `CIDRGrant` is the same shape as
+  `Grant` otherwise — one tag, one address, a required, spelled-out port
+  list — and `Validate` refuses an empty port list the same way. Optional;
+  a `Policy` with no `ExtraCIDRGrants` renders byte-identical ACLs to
+  before this version.
+
 ## v1.8.0
 
 - **New: `pkg/acl`'s `Policy.ExtraGrants` / `Grant`** — one narrow,
