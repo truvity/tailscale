@@ -55,6 +55,22 @@ without creating a resource:
 | a user with an empty principal list | an entry that admits nobody; omit the user instead |
 | a principal with spaces, options or a leading `#`, or repeated | an `authorized_principals` line sshd reads as options or as a comment |
 
+`validateOPKSSH` does the same for the opkssh input, `OPKSSH`, whenever
+`Enabled` is `true`:
+
+| Refusal | What it prevents |
+|---|---|
+| a missing `ArtifactVersion` | an `install-linux.sh --install-version` with nothing to install |
+| a checksum that is not 64 lowercase hex characters | a typo'd or truncated sha256 that would never match anything, silently forcing every install to fail closed at runtime instead of at plan time |
+| a URL that is not an absolute `https://` URL (`ArtifactURL`, `SELinuxModuleURL`, `InstallScriptURL`, or a `Providers[].Issuer`) | fetching a pinned artifact — or trusting an issuer — over anything looser than https |
+| an empty `Providers` | opkssh installed to trust no OpenID Provider |
+| a `Providers[].ClientID` that is empty or not a plain token | a value opkssh's space-delimited `/etc/opk/providers` would read as extra columns, or a shell metacharacter reaching the rendered install script |
+| a `Providers[].Expiration` that is not one of opkssh's own policies (`12h`, `24h`, `48h`, `1week`, `oidc`, `oidc-refreshed`) | a value opkssh's parser does not recognize |
+| an empty `AuthorizedIdentities` | opkssh installed to admit nobody |
+| an `AuthorizedIdentities[].User` that is not a plain login name, or `root` | the same class of mistake `AuthorizedPrincipals` refuses, for opkssh's principals |
+| an `AuthorizedIdentities[].Group` that is empty or not a plain token (whitespace, `;`, `` ` ``, `$()`, quotes, …) | the group name is refused outright, never escaped — see "refuse what we name, escape what we are handed" |
+| an `AuthorizedIdentities[].Issuer` that is not one of `Providers`' issuers | a typo'd issuer that opkssh would otherwise trust nothing from, silently |
+
 ### pkg/acl
 
 `Build` validates first: a network without a name, VPC CIDR or router tag;
@@ -160,14 +176,21 @@ and the lifecycle hook allows 15 minutes for it.
 ## Routers: access, diagnosis and break-glass
 
 A router has **no interactive access** other than SSH with a certificate
-signed by a CA in `TrustedUserCAKeys`, and none at all when that input is
-empty: no key pair, no TCP port in the security group, no Session Manager.
-With the SSH inputs set, SSH arrives over `tailscale0` only, so the tailnet
-policy must let the certificate holders reach the router's tag on port 22
-(`pkg/acl` grants `tag:<router>:*` to every VPC-tier group; the certificate
-decides who logs in). A certificate is refused when it has expired, when
-another CA signed it, or when none of its principals is listed for the login
-user. Each login logs the certificate's key id and serial.
+signed by a CA in `TrustedUserCAKeys`, or an identity in `OPKSSH`'s
+`AuthorizedIdentities` (opkssh), and none at all when both inputs are empty:
+no key pair, no TCP port in the security group, no Session Manager. With
+either SSH input set, SSH arrives over `tailscale0` only, so the tailnet
+policy must let the holders reach the router's tag on port 22 (`pkg/acl`
+grants `tag:<router>:*` to every VPC-tier group; the certificate or the ID
+token decides who logs in). A certificate is refused when it has expired,
+when another CA signed it, or when none of its principals is listed for the
+login user; an opkssh sign-in is refused when no `/etc/opk/auth_id` line
+matches the login user, group and issuer. `TrustedUserCAKeys` (certificate
+login) and `AuthorizedKeysCommand` (opkssh) are independent sshd
+mechanisms — sshd tries each configured one in turn for pubkey auth — so
+both can be set on the same router at once, and a router can carry either,
+both, or neither. Each login logs the certificate's key id and serial, or
+(for opkssh) the identity opkssh extracts from the verified ID token.
 
 **Diagnose a router that did not join** from the serial console, no shell
 needed. cloud-init and the join script both write there, one line per attempt:
@@ -232,6 +255,29 @@ router.
 EC2 refuses user data over 16 KiB, and the SSH inputs are written into it. A
 test keeps two CA keys and two users 1 KiB under the limit; a long principal
 map can still cross it, and then AWS refuses the launch template.
+
+### pkg/awsrouter: opkssh's tight margin against the 16 KiB limit
+
+opkssh's own pinned artifacts add real, unavoidable bytes to the user
+data: three URLs and three sha256 digests it must carry to verify them
+before installing (fail closed on a mismatch). Set alone, it still keeps
+the same 1 KiB headroom as the other cases. Stacked on an existing
+one-key certificate login — the realistic shape for a router that already
+has one, since opkssh is meant to be added to it, not to replace it — the
+combined render comes within a few hundred bytes of the hard 16 KiB
+limit, not 1 KiB. `pkg/awsrouter/opkssh_test.go`'s
+`TestUserDataOPKSSHWithCertificateLoginFitsEC2Limit` checks that
+combination against the true limit with a smaller, explicit margin
+instead of the usual convention.
+
+**Consequence for a caller:** keep `OPKSSH.Providers` and
+`OPKSSH.AuthorizedIdentities` minimal (the pilot needs one of each), and do
+not roll an opkssh change during an active CA rotation (`TrustedUserCAKeys`
+carrying two keys, `AuthorizedPrincipals` naming more than one user) without
+re-checking the render's size first — that combination can exceed the hard
+limit outright, which Pulumi/AWS then refuses at apply time, not at preview
+time in every case. There is no way to raise the limit; the only lever is
+what goes into the user data.
 
 ### tailscaled's image tag moves
 

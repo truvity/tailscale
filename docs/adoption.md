@@ -90,6 +90,7 @@ render or a preview:
 
 | Version | What you will see |
 |---|---|
+| v1.10.0 | `pkg/awsrouter`: optional `OPKSSH`, additive to `TrustedUserCAKeys`/`AuthorizedPrincipals`. Unset (or `Enabled: false`), the user data is byte-for-byte as in 1.9.0 and no router is replaced. Setting it is a new launch-template version and a refresh; check the render's size first if certificate login is also set (`safety.md#pkgawsrouter-opksshs-tight-margin-against-the-16-kib-limit`) |
 | v1.7.1 | `pkg/awsrouter`: the preview deletes the role's attachment of `AmazonSSMManagedInstanceCore`, and the user data changes (the join log goes to the serial console), so the launch template gets a new version and the instance refresh replaces every router once. No input changed. Anything outside this module that relied on the router role holding that managed policy — Session Manager, Systems Manager inventory or patching — loses it; routers were never reachable through Session Manager, and access is now SSH with a certificate or nothing ([safety.md](safety.md#routers-access-diagnosis-and-break-glass)) |
 | v1.7.0 | `pkg/awsrouter`: optional `TrustedUserCAKeys` and `AuthorizedPrincipals`. Unset, the user data is byte-for-byte as in 1.6.1 and no router is replaced. Setting them is a new launch-template version and a refresh |
 | v1.6.1 | `tailscaled`: the default memory request goes 64Mi → 128Mi and the limit 128Mi → 512Mi, so pods roll. No diff if you set `resources` |

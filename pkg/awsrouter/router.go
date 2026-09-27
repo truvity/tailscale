@@ -109,6 +109,13 @@ type (
 		// certificate at all. root is refused (PermitRootLogin no).
 		// Requires TrustedUserCAKeys.
 		AuthorizedPrincipals map[string][]string
+
+		// OPKSSH configures optional OIDC sign-in via opkssh
+		// (AuthorizedKeysCommand), additive to the certificate login
+		// above — see opkssh.go. nil, or OPKSSH.Enabled false (the
+		// default): the user data renders exactly as it did before this
+		// input existed.
+		OPKSSH *OPKSSHConfig
 	}
 
 	// TailscaleInstanceResult holds references to all created Tailscale instance resources.
@@ -129,6 +136,7 @@ type (
 		ASGName           string           // ASG name for lifecycle hook signal
 		LifecycleHookName string           // Lifecycle hook name for readiness signal
 		SSHUserCA         *sshUserCAParams // nil: no certificate login (default)
+		OPKSSH            *OPKSSHConfig    // nil: no opkssh sign-in (default)
 	}
 )
 
@@ -161,6 +169,10 @@ func CreateTailscaleInstance(
 	ctx := c.Context()
 
 	if err := config.validateSSHUserCA(); err != nil {
+		return nil, err
+	}
+
+	if err := config.validateOPKSSH(); err != nil {
 		return nil, err
 	}
 
@@ -523,6 +535,7 @@ func buildTailscaleUserData(config TailscaleInstanceConfig) string {
 		ASGName:           config.baseName(),
 		LifecycleHookName: config.baseName() + "-launch",
 		SSHUserCA:         config.sshUserCAParams(),
+		OPKSSH:            config.opksshParams(),
 	}); err != nil {
 		// Template is embedded and tested — panic is appropriate for a compile-time error.
 		panic(fmt.Sprintf("render tailscale user-data template: %v", err))
