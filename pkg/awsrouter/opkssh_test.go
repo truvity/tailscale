@@ -89,17 +89,36 @@ func TestUserDataOPKSSHInstallScript(t *testing.T) {
 		c.OPKSSH.InstallScriptURL,
 		c.OPKSSH.InstallScriptSHA256,
 		"sha256sum -c",
-		`fail(){ echo "$(date -u +%FT%TZ) opkssh: $1, aborting"; exit 0; }`,
-		`|| fail "checksum failed"`,
-		`|| fail "install failed"`,
+		`c=/etc/ssh/sshd_config.d/60-opk-ssh.conf`,
+		`fail(){ echo "opkssh $1 fail"; rm -f "$c"; exit 0; }`,
+		`|| fail "checksum"`,
+		`|| fail "install"`,
 	} {
 		assert.Contains(t, script, want)
 	}
 
+	// EC2 Instance Connect ships its own AuthorizedKeysCommand on some
+	// AL2023 AMIs, which would silently win over opkssh's AND change
+	// which sshd drop-in filename install-linux.sh picks — so it is
+	// removed BEFORE install-linux.sh ever runs, not after.
+	dnfIndex := strings.Index(script, "dnf remove -y ec2-instance-connect || true")
+	installIndex := strings.Index(script, `bash "$d/s"`)
+	require.GreaterOrEqual(t, dnfIndex, 0)
+	require.GreaterOrEqual(t, installIndex, 0)
+	assert.Less(t, dnfIndex, installIndex, "ec2-instance-connect must be removed before install-linux.sh runs")
+
+	// --no-home-policy: the only policy surface is /etc/opk/auth_id.
+	// Without it, install-linux.sh lets a login user grant themselves
+	// extra identities via ~user/.opk/auth_id and installs a passwordless
+	// sudoers rule for opkssh to read it. The script also asserts that
+	// rule was not created, rather than trusting the flag silently.
+	assert.Contains(t, script, "--no-home-policy")
+	assert.Contains(t, script, `[ -e /etc/sudoers.d/opkssh ] && fail "sudoers"`)
+
 	// install-linux.sh runs with the verified local files and
 	// --no-sshd-restart, so nothing reloads sshd before our own sshd -t
 	// gate below.
-	assert.Contains(t, script, `--install-from="$d/bin" --install-te-from="$d/te"`)
+	assert.Contains(t, script, `--install-from="$d/b" --install-te-from="$d/t"`)
 	assert.Contains(t, script, `--install-version="0.16.0" --no-sshd-restart`)
 
 	// The providers/auth_id content and the ownership/mode opkssh's own
@@ -109,17 +128,13 @@ func TestUserDataOPKSSHInstallScript(t *testing.T) {
 	assert.Contains(t, script, "chown root:opksshuser /etc/opk/providers /etc/opk/auth_id")
 	assert.Contains(t, script, "chmod 640 /etc/opk/providers /etc/opk/auth_id")
 
-	// EC2 Instance Connect ships its own AuthorizedKeysCommand on some
-	// AL2023 AMIs and would silently win over opkssh's.
-	assert.Contains(t, script, "dnf remove -y ec2-instance-connect || true")
-
 	// The lock-out-safe guard: sshd -t before any reload, and a
 	// rollback (removing only the opkssh drop-in) on failure — the
 	// certificate path's own files are never named here.
 	sshdTIndex := strings.Index(script, "sshd -t && {")
 	require.GreaterOrEqual(t, sshdTIndex, 0, "sshd -t must gate the reload")
 	assert.Contains(t, script, "systemctl reload sshd")
-	assert.Contains(t, script, "rm -f /etc/ssh/sshd_config.d/60-opk-ssh.conf")
+	assert.Contains(t, script, `rm -f "$c"`)
 	assert.NotContains(t, script, "trusted-user-ca-keys")
 	assert.NotContains(t, script, "10-user-ca.conf")
 	for path := range files {

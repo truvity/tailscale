@@ -18,6 +18,10 @@ import (
 //
 // With OPKSSH set, cloud-init:
 //
+//   - removes ec2-instance-connect first (some AL2023 AMIs ship it
+//     pre-enabled with its own AuthorizedKeysCommand, which would
+//     silently win over opkssh's, and would also change which sshd
+//     drop-in filename install-linux.sh picks next);
 //   - downloads the pinned opkssh binary, its scripts/install-linux.sh
 //     and its SELinux type-enforcement module, verifying each against
 //     its sha256 before using it — a mismatch aborts the install, fail
@@ -25,16 +29,22 @@ import (
 //   - runs install-linux.sh (which creates the opksshuser system
 //     account, installs the SELinux module AL2023's enforcing policy
 //     needs, and wires sshd's AuthorizedKeysCommand) with
-//     --no-sshd-restart, so nothing reloads sshd until our own
-//     `sshd -t` gate passes;
+//     --no-home-policy and --no-sshd-restart. --no-home-policy matters:
+//     without it, install-linux.sh lets a login user grant their own
+//     account extra identities via ~user/.opk/auth_id and installs a
+//     passwordless sudoers rule so opkssh can read it — a second policy
+//     surface a shell user could self-serve from, bypassing the single
+//     roster-rendered /etc/opk/auth_id this router is meant to enforce.
+//     The install script also asserts /etc/sudoers.d/opkssh does not
+//     exist afterward and aborts if it does, rather than trusting the
+//     flag silently. --no-sshd-restart means nothing reloads sshd until
+//     our own `sshd -t` gate passes;
 //   - writes /etc/opk/providers and /etc/opk/auth_id with the ownership
 //     (root:opksshuser) and mode (0640) opkssh's own docs require;
-//   - removes ec2-instance-connect (some AL2023 AMIs ship it pre-enabled
-//     with its own AuthorizedKeysCommand, which would silently win over
-//     opkssh's);
-//   - runs `sshd -t` before ever reloading sshd; on failure it removes
-//     only the opkssh drop-in and leaves the previously running sshd,
-//     and the certificate path, untouched.
+//   - runs `sshd -t` before ever reloading sshd; on failure (or on any
+//     earlier fail-closed abort) it removes only the opkssh drop-in and
+//     leaves the previously running sshd, and the certificate path,
+//     untouched.
 //
 // nil OPKSSH, or OPKSSH.Enabled false (the default): none of the above
 // runs, and the user data renders exactly as it did before this input

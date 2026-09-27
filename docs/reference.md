@@ -326,18 +326,26 @@ case. With neither input, the SSH inputs add nothing: the default user data
 is byte-for-byte what it was before they existed.
 
 With `OPKSSH` set, `/usr/local/sbin/opkssh-install.sh` (written by cloud-init,
-run once from `runcmd`, after the certificate-login block) downloads the
+run once from `runcmd`, after the certificate-login block) first removes
+`ec2-instance-connect` (some AL2023 AMIs ship it pre-enabled with its own
+`AuthorizedKeysCommand`, which would otherwise silently win over opkssh's —
+removing it first, rather than after, also keeps install-linux.sh's own
+drop-in filename choice deterministic, see safety.md), then downloads the
 pinned opkssh binary, `opkssh.te` and `install-linux.sh`, verifying each
 against its configured sha256 before using it — a mismatch aborts the
 install, fail closed, and never touches sshd. It then runs `install-linux.sh
---install-from=... --install-te-from=... --install-version=... --no-sshd-restart`
-(creating the `opksshuser` system account, loading the SELinux module AL2023's
-enforcing policy needs, and wiring `AuthorizedKeysCommand` — but not reloading
-sshd), writes `/etc/opk/providers` and `/etc/opk/auth_id` (`root:opksshuser`,
-mode `0640`), removes `ec2-instance-connect` (some AL2023 AMIs ship it
-pre-enabled with its own `AuthorizedKeysCommand`, which would otherwise
-silently win over opkssh's), and only then runs `sshd -t`: on success it
-reloads sshd, on failure it removes only the opkssh drop-in and leaves the
+--install-from=... --install-te-from=... --no-home-policy --install-version=...
+--no-sshd-restart` (creating the `opksshuser` system account, loading the
+SELinux module AL2023's enforcing policy needs, and wiring
+`AuthorizedKeysCommand` — but not reloading sshd). `--no-home-policy` keeps
+the only policy surface `/etc/opk/auth_id`: without it, install-linux.sh lets
+a login user grant themselves extra identities via `~user/.opk/auth_id` and
+installs a passwordless `sudoers.d` rule so opkssh can read it. The script
+asserts `/etc/sudoers.d/opkssh` was not created rather than trusting the flag
+silently, and aborts (rolling back its own drop-in) if it was. It then writes
+`/etc/opk/providers` and `/etc/opk/auth_id` (`root:opksshuser`, mode `0640`),
+and only then runs `sshd -t`: on success it reloads sshd, on failure — or any
+earlier fail-closed abort — it removes only the opkssh drop-in and leaves the
 previously running sshd — and the certificate-login files above, never
 touched by this script — exactly as they were. `AuthorizedKeysCommand` and
 `TrustedUserCAKeys` are independent sshd mechanisms, so opkssh is additive

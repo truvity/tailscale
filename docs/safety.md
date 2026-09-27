@@ -279,6 +279,34 @@ limit outright, which Pulumi/AWS then refuses at apply time, not at preview
 time in every case. There is no way to raise the limit; the only lever is
 what goes into the user data.
 
+### pkg/awsrouter: opkssh's home policy is disabled on purpose
+
+install-linux.sh defaults to **home policy** (`HOME_POLICY=true`): it lets
+`~<user>/.opk/auth_id` grant that account extra identities on top of
+`/etc/opk/auth_id`, and to make that work it installs
+`/etc/sudoers.d/opkssh` with a passwordless rule
+(`opksshuser ALL=(ALL) NOPASSWD: /usr/local/bin/opkssh readhome *`). On a
+router that is the wrong shape: the only policy this estate renders is
+`/etc/opk/auth_id`, from `OPKSSH.AuthorizedIdentities` — a second,
+self-service policy file would let anyone who reaches a shell as a login
+user (an already-authorized opkssh or certificate identity) grant that
+*same account* extra identities, bypassing the roster-rendered groups
+entirely and outliving whatever revoked the identity that let them in.
+
+`opkssh-install.sh` passes `--no-home-policy` (no sudoers rule, no SELinux
+`opkssh_enable_home` boolean), and then asserts `/etc/sudoers.d/opkssh`
+does **not** exist afterward — refusing and rolling back the opkssh
+drop-in if it does, rather than trusting the flag silently. `dnf remove -y
+ec2-instance-connect` also runs *before* install-linux.sh, not after: on
+AL2023's stock `sshd_config` (which keeps its `Include
+.../sshd_config.d/*.conf` line and sets no `AuthorizedKeysCommand` of its
+own), install-linux.sh writes the directive into a **new** drop-in file
+rather than appending to `sshd_config` itself, and it picks that file's
+priority prefix by looking at whatever *already* claims
+`AuthorizedKeysCommand` — removing ec2-instance-connect first keeps that
+outcome the same known file (`60-opk-ssh.conf`, opkssh's own default),
+so "remove that one file" is always a complete rollback.
+
 ### tailscaled's image tag moves
 
 `image.tag` defaults to `stable`, so the same render can run a newer
