@@ -39,7 +39,7 @@ packages:
   - nmap-ncat
   - tcpdump
   - traceroute
-  # opkssh.go: wget, checkpolicy deps.
+  # opkssh.go: wget, checkpolicy.
   - wget
   - checkpolicy
 
@@ -93,22 +93,24 @@ write_files:
       ClientAliveInterval 300
       ClientAliveCountMax 2
 
-  # opkssh.go: additive OIDC sign-in, fail-closed.
+  # opkssh.go: additive OIDC sign-in.
   - path: /usr/local/sbin/opkssh-install.sh
     permissions: "0755"
     content: |
       #!/bin/bash
       set -uo pipefail
       exec > >(tee -a /var/log/opkssh-install.log) 2>&1
-      d=/tmp/opkssh-install; mkdir -p "$d"
-      fail(){ echo "$(date -u +%FT%TZ) opkssh: $1, aborting"; exit 0; }
-      for a in "bin https://github.com/openpubkey/opkssh/releases/download/v0.16.0/opkssh-linux-arm64 9dd10c2b6ce99cde18e52c054877ca014134b291fd82afe71741c68db4f83d44" "te https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/opkssh.te f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb9546926c4" "i.sh https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/scripts/install-linux.sh 493cc42f55b2da31491c3947fd75dc2589d691d1a79fa284fc8e9fef3815ca54"; do
+      d=/tmp/opkssh-install; mkdir -p "$d"; c=/etc/ssh/sshd_config.d/60-opk-ssh.conf
+      fail(){ echo "opkssh $1 fail"; rm -f "$c"; exit 0; }
+      dnf remove -y ec2-instance-connect || true
+      for a in "b https://github.com/openpubkey/opkssh/releases/download/v0.16.0/opkssh-linux-arm64 9dd10c2b6ce99cde18e52c054877ca014134b291fd82afe71741c68db4f83d44" "t https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/opkssh.te f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb9546926c4" "s https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/scripts/install-linux.sh 493cc42f55b2da31491c3947fd75dc2589d691d1a79fa284fc8e9fef3815ca54"; do
         set -- $a
-        curl -fsSL -o "$d/$1" "$2" && printf '%s  %s\n' "$3" "$d/$1" | sha256sum -c - >/dev/null || fail "checksum failed"
+        curl -fsSL -o "$d/$1" "$2" && printf '%s  %s\n' "$3" "$d/$1" | sha256sum -c - >/dev/null || fail "checksum"
       done
-      chmod +x "$d/i.sh"
-      bash "$d/i.sh" --install-from="$d/bin" --install-te-from="$d/te" \
-        --install-version="0.16.0" --no-sshd-restart || fail "install failed"
+      chmod +x "$d/s"
+      bash "$d/s" --install-from="$d/b" --install-te-from="$d/t" --no-home-policy \
+        --install-version="0.16.0" --no-sshd-restart || fail "install"
+      [ -e /etc/sudoers.d/opkssh ] && fail "sudoers"
       cat > /etc/opk/providers <<'EOF'
       https://access.example.com opkssh 24h
       EOF
@@ -117,9 +119,8 @@ write_files:
       EOF
       chown root:opksshuser /etc/opk/providers /etc/opk/auth_id
       chmod 640 /etc/opk/providers /etc/opk/auth_id
-      dnf remove -y ec2-instance-connect || true
-      sshd -t && { systemctl reload sshd 2>/dev/null || systemctl restart sshd; echo "$(date -u +%FT%TZ) opkssh: installed"; } ||
-        { echo "$(date -u +%FT%TZ) opkssh: sshd -t failed, rollback"; rm -f /etc/ssh/sshd_config.d/60-opk-ssh.conf; }
+      sshd -t && { systemctl reload sshd 2>/dev/null || systemctl restart sshd; echo "$(date -u +%FT%TZ) installed"; } ||
+        { echo "$(date -u +%FT%TZ) sshd -t failed"; rm -f "$c"; }
 
   # Nightly update + conditional reboot — ISO 27001 A.8.8
   # Runs daily at 00:00 UTC (01:00 CET / 02:00 CEST — Amsterdam night).
