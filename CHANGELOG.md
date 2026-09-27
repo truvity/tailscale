@@ -5,6 +5,19 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. Both charts and the Go module are released
 together at every version.
 
+## v1.10.1
+
+- **Guard: every invoke in `pkg/awsrouter` now proves it carries an
+  explicit provider.** `ec2.LookupAmi` and `aws.GetCallerIdentity` already
+  passed `pulumi.Provider(awsProvider)` — the same provider the package's
+  resources use — so no behavior changes here. But an invoke missing that
+  option passes every unit test under the SDK's default mocks (it silently
+  falls back to the ambient default provider) and only fails at `pulumi
+  preview`, on an estate that disables default providers. A new mocks-level
+  test (`pkg/awsrouter/router_test.go`) fails any invoke whose mock request
+  carries no provider reference, so a future regression is a unit-test
+  failure instead of a broken preview.
+
 ## v1.10.0
 
 - **New: `pkg/awsrouter`'s `OPKSSHConfig`** — optional OIDC sign-in via
