@@ -16,10 +16,10 @@ import (
 // made without an explicit provider reference. The SDK's ordinary mocks
 // accept an unscoped invoke — it silently falls back to the ambient
 // default provider — so a call site missing pulumi.Provider(...) passes
-// every unit test and only fails at `pulumi preview`, on an estate
-// (gitops) that disables default providers. This guard turns that gap
-// into a unit-test failure: see the "must pass its own provider" test
-// below, and CHANGELOG.md.
+// every unit test and only fails at `pulumi preview`, on any estate
+// that disables default providers. This guard turns that gap into a
+// unit-test failure: see the "must pass its own provider" test below,
+// and CHANGELOG.md.
 type providerGuardMocks struct {
 	mu  sync.Mutex
 	res map[string]resource.PropertyMap
@@ -43,8 +43,8 @@ func (m *providerGuardMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMa
 	// the caller's result struct.
 	return resource.NewPropertyMapFromMap(map[string]interface{}{
 		"id":        "ami-0123456789abcdef0",
-		"accountId": "123456789012",
-		"arn":       "arn:aws:iam::123456789012:root",
+		"accountId": "example-account",
+		"arn":       "arn:aws:iam::example-account:root",
 		"userId":    "AIDACKCEVSQ6C2EXAMPLE",
 	}), nil
 }
