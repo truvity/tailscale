@@ -251,6 +251,7 @@ func TestUserDataFitsEC2Limit(t *testing.T) {
 	for name, c := range map[string]TailscaleInstanceConfig{
 		"default":     exampleConfig(),
 		"ssh-user-ca": sshCAConfig(t),
+		"opkssh":      opksshConfig(t),
 	} {
 		size := len(buildTailscaleUserData(c))
 		assert.Less(t, size, ec2UserDataLimit-1024, "%s user data is %d bytes; keep 1 KiB of headroom under EC2's 16 KiB", name, size)

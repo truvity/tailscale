@@ -10,7 +10,7 @@ keys and split DNS as code.
 | `charts/tsdns` | Split-DNS gateway: CoreDNS on a pinned ClusterIP serving a tailnet-only suffix, plus forwarded zones | shipped |
 | `pkg/acl` | Pure tailnet policy builder: tag ownership, two access tiers, per-environment route auto-approval, from a neutral model; deterministic JSON out | shipped |
 | `pkg/tailnet` | Pulumi Go: the policy resource (sole owner), router auth keys (ephemeral, tagged, rotated by name), split DNS, S3 flow logs, a pinned service-IP helper | shipped |
-| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet (security group, least-privilege role, launch template, ASG with optional warm pool), optional SSH user-certificate login; the one cloud-specific package | shipped |
+| `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet (security group, least-privilege role, launch template, ASG with optional warm pool), optional SSH user-certificate login and optional OIDC sign-in via opkssh; the one cloud-specific package | shipped |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag; the
 Go module is `github.com/truvity/tailscale`.
