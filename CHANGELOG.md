@@ -5,6 +5,18 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. Both charts and the Go module are released
 together at every version.
 
+## v1.8.0
+
+- **New: `pkg/acl`'s `Policy.ExtraGrants` / `Grant`** — one narrow,
+  explicit tag-to-tag accept rule (a single source tag, a single
+  destination tag, a required, spelled-out port list) for access that
+  fits neither the VPC/Service-CIDR tiers nor a router's own
+  reachability rule: an application box outside every cluster that one
+  cluster's egress identity needs to reach on one port, for instance.
+  `Validate` refuses a Grant with an empty port list rather than
+  defaulting it to the whole tag. Optional; a `Policy` with no
+  `ExtraGrants` renders byte-identical ACLs to before this version.
+
 ## v1.7.1
 
 - **`pkg/awsrouter`: routers no longer carry `AmazonSSMManagedInstanceCore`.**

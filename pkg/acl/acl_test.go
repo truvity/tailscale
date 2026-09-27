@@ -164,6 +164,92 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestExtraGrantsRenderNarrowRules(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraGrants = []Grant{
+		{SrcTag: "k8s-devel-router", DstTag: "statusbox", Ports: []string{"9092"}},
+	}
+
+	_, doc := build(t, p)
+
+	var found *rule
+
+	for i, r := range doc.ACLs {
+		if len(r.Src) == 1 && r.Src[0] == "tag:k8s-devel-router" && len(r.Dst) == 1 && r.Dst[0] == "tag:statusbox:9092" {
+			found = &doc.ACLs[i]
+		}
+	}
+
+	require.NotNil(t, found, "no rule matched tag:k8s-devel-router -> tag:statusbox:9092 in %+v", doc.ACLs)
+	assert.Equal(t, accept, found.Action)
+
+	// ExtraGrants introduces no tagOwners entry of its own — Grant is
+	// purely a rule, and ownership of the destination tag is still
+	// ExtraTagOwners's job (or Validate would have to know a great deal
+	// more about what a caller intends the destination tag to mean).
+	assert.NotContains(t, doc.TagOwners, "tag:statusbox")
+}
+
+func TestExtraGrantsJoinMultiplePorts(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraGrants = []Grant{
+		{SrcTag: "k8s-devel-router", DstTag: "statusbox", Ports: []string{"9092", "9093"}},
+	}
+
+	_, doc := build(t, p)
+
+	var dsts []string
+	for _, r := range doc.ACLs {
+		if len(r.Src) == 1 && r.Src[0] == "tag:k8s-devel-router" {
+			dsts = append(dsts, r.Dst...)
+		}
+	}
+
+	assert.Contains(t, dsts, "tag:statusbox:9092,9093")
+}
+
+func TestExtraGrantsPreserveDeclarationOrder(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraGrants = []Grant{
+		{SrcTag: "a", DstTag: "b", Ports: []string{"1"}},
+		{SrcTag: "c", DstTag: "d", Ports: []string{"2"}},
+	}
+
+	_, doc := build(t, p)
+
+	n := len(doc.ACLs)
+	require.GreaterOrEqual(t, n, 2)
+	assert.Equal(t, []string{"tag:a"}, doc.ACLs[n-2].Src)
+	assert.Equal(t, []string{"tag:c"}, doc.ACLs[n-1].Src)
+}
+
+func TestExtraGrantsValidateRefusesAnEmptyPortList(t *testing.T) {
+	p := examplePolicy()
+	p.ExtraGrants = []Grant{{SrcTag: "a", DstTag: "b"}}
+
+	err := p.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no ports")
+}
+
+func TestExtraGrantsValidateRefusesAMissingTag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		g    Grant
+	}{
+		{"no srcTag", Grant{DstTag: "b", Ports: []string{"1"}}},
+		{"no dstTag", Grant{SrcTag: "a", Ports: []string{"1"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := examplePolicy()
+			p.ExtraGrants = []Grant{tc.g}
+			err := p.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "needs srcTag and dstTag")
+		})
+	}
+}
+
 func TestManagerTagDefaultAndOverride(t *testing.T) {
 	_, doc := build(t, examplePolicy())
 	assert.Contains(t, doc.TagOwners, "tag:infra-manager")
