@@ -28,6 +28,12 @@
 //     application box outside every cluster that one cluster's egress
 //     identity needs to reach on one port, say. It stays this narrow on
 //     purpose: see Grant's own doc comment.
+//   - Policy.ExtraCIDRGrants is the same escape hatch for the one shape
+//     Grant's own doc comment names and refuses to grow into: a
+//     destination that is an address rather than a tag — a tagged
+//     device reaching one address behind a subnet router (a private
+//     gateway's pinned ClusterIP, say) that carries no tag of its own
+//     for a Grant to name. See CIDRGrant's own doc comment.
 //
 // No `ssh` and no `groups` sections, deliberately. The `ssh` section
 // configures Tailscale SSH (tailscaled answering SSH itself); a router
@@ -116,6 +122,45 @@ type (
 		Ports []string `json:"ports" yaml:"ports"`
 	}
 
+	// CIDRGrant is one explicit, narrow accept rule from a tag to a
+	// destination address — Grant's sibling for the one shape Grant's
+	// own doc comment names and refuses to grow into.
+	//
+	// A tagged device reaching one address behind a subnet router (a
+	// private gateway's pinned ClusterIP, say, rather than the whole VPC
+	// CIDR the router already advertises) is neither a VPC/Service-CIDR
+	// tier — those are GROUP-sourced, reached by a person's role, not a
+	// TAG the way a device like this carries one — nor a router's own
+	// reachability rule, which admits the router itself and not
+	// something behind it. It is a second escape hatch rather than a
+	// field grown onto Grant, on purpose: Grant is deliberately tag only
+	// on both sides (its own doc comment says so), and a type whose
+	// destination is sometimes a tag and sometimes an address is a type
+	// whose every caller has to check which one it got.
+	//
+	// This is deliberately the ONLY shape ExtraCIDRGrants accepts — one
+	// tag to one address, ports only, no groups, no autogroups, no tag
+	// destination (that is Grant's shape, not this one).
+	CIDRGrant struct {
+		// SrcTag is a tag name without the "tag:" prefix.
+		SrcTag string `json:"srcTag" yaml:"srcTag"`
+		// DstCIDR is the destination address, in the exact form the
+		// rendered rule should carry it — a single host as a /32 (or
+		// /128), or a narrower CIDR, e.g. "100.20.0.20/32". Never a bare
+		// address without a prefix length: Tailscale's ACL syntax reads
+		// one unqualified, so the shape that means "this one address"
+		// is spelled out rather than implied.
+		DstCIDR string `json:"dstCidr" yaml:"dstCidr"`
+		// Ports the rule admits on DstCIDR, e.g. []string{"443"}. Every
+		// entry is rendered into one comma-joined dst
+		// ("100.20.0.20/32:443,8443"), the same list-of-ports spelling
+		// Grant uses for a tag destination. Required, for the identical
+		// reason Grant refuses an empty list: a rule with no port list
+		// admits the whole address rather than the one service it
+		// exists to reach.
+		Ports []string `json:"ports" yaml:"ports"`
+	}
+
 	// Policy is the whole tailnet's input model. Plain data,
 	// yaml/json-taggable.
 	Policy struct {
@@ -133,6 +178,11 @@ type (
 		// doc comment for why this stays narrow. Rendered after every
 		// rule the model derives, in the order given.
 		ExtraGrants []Grant `json:"extraGrants,omitempty" yaml:"extraGrants,omitempty"`
+		// ExtraCIDRGrants are one-off tag-to-address accept rules —
+		// Grant's sibling for a destination that is an address rather
+		// than a tag. See CIDRGrant's own doc comment. Rendered after
+		// ExtraGrants, in the order given.
+		ExtraCIDRGrants []CIDRGrant `json:"extraCidrGrants,omitempty" yaml:"extraCidrGrants,omitempty"`
 	}
 
 	policyDoc struct {
@@ -207,6 +257,19 @@ func (p *Policy) Validate() error {
 		}
 	}
 
+	for _, g := range p.ExtraCIDRGrants {
+		if g.SrcTag == "" || g.DstCIDR == "" {
+			return fmt.Errorf("acl: extra cidr grant %+v needs srcTag and dstCidr", g)
+		}
+
+		if len(g.Ports) == 0 {
+			return fmt.Errorf("acl: extra cidr grant %s -> %s has no ports: "+
+				"a CIDRGrant admitting a whole address with no port list is "+
+				"exactly the blast radius this type exists to avoid, so it is "+
+				"refused rather than defaulted to everything", g.SrcTag, g.DstCIDR)
+		}
+	}
+
 	return nil
 }
 
@@ -233,9 +296,13 @@ func Build(p Policy) (string, error) {
 		netByName[networks[i].Name] = &networks[i]
 	}
 
+	acls := rules(networks, clusters, netByName)
+	acls = append(acls, grantRules(p.ExtraGrants)...)
+	acls = append(acls, cidrGrantRules(p.ExtraCIDRGrants)...)
+
 	doc := policyDoc{
 		TagOwners:     tagOwners(manager, p.ExtraTagOwners, networks, clusters),
-		ACLs:          append(rules(networks, clusters, netByName), grantRules(p.ExtraGrants)...),
+		ACLs:          acls,
 		AutoApprovers: approvers(networks, clusters, netByName),
 	}
 
@@ -377,6 +444,24 @@ func grantRules(grants []Grant) []rule {
 			Action: accept,
 			Src:    []string{"tag:" + g.SrcTag},
 			Dst:    []string{"tag:" + g.DstTag + ":" + strings.Join(g.Ports, ",")},
+		})
+	}
+
+	return out
+}
+
+// cidrGrantRules renders each ExtraCIDRGrant as one rule, the same way
+// grantRules renders a Grant — order preserved, not sorted, for the same
+// reason grantRules is not: determinism comes from the caller building
+// the slice in a stable order.
+func cidrGrantRules(grants []CIDRGrant) []rule {
+	out := make([]rule, 0, len(grants))
+
+	for _, g := range grants {
+		out = append(out, rule{
+			Action: accept,
+			Src:    []string{"tag:" + g.SrcTag},
+			Dst:    []string{g.DstCIDR + ":" + strings.Join(g.Ports, ",")},
 		})
 	}
 
