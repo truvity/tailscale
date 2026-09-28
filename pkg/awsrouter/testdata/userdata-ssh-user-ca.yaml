@@ -83,6 +83,7 @@ write_files:
       LIFECYCLE_HOOK_NAME="example-tailscale-acme-launch"
       SSH_USER_CA="true"
       OPKSSH="false"
+      HOST_CERT="false"
 
   # SSH user certificates only (ssh.go); router-setup.sh copies these
   # into their final /etc/ssh/... paths and writes the sshd drop-in.
@@ -110,7 +111,7 @@ runcmd:
   # applied (swap, timezone, packages) — never a half-verified script.
   - curl -fsSL -o /usr/local/sbin/router-setup.sh "https://github.com/truvity/tailscale/releases/download/v1.11.0/router-setup-v1.11.0.sh"
   - |
-    echo "0f9e086f75759b1fe248b949cfaa7688d5e87faf36dd9d461402a0d3ae89dcb2  /usr/local/sbin/router-setup.sh" | sha256sum -c - || { echo "router-setup checksum fail"; exit 0; }
+    echo "ace8563f654a0b84101e92b52880b336b97a9377b970d3990ffb42621f9ec078  /usr/local/sbin/router-setup.sh" | sha256sum -c - || { echo "router-setup checksum fail"; exit 0; }
   - chmod 0755 /usr/local/sbin/router-setup.sh
   - /usr/local/sbin/router-setup.sh || echo "router-setup fail"
 

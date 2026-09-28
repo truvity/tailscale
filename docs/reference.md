@@ -227,6 +227,24 @@ func routerFleet(
 				{User: "ec2-user", Group: "ssh-admins", Issuer: "https://access.example.com"},
 			},
 		},
+
+		// Optional: SSH host-certificate renewal via truvity/openbao's
+		// cmd/openbao-hostcert.
+		HostCert: &awsrouter.HostCertConfig{
+			Enabled:         true,
+			ArtifactVersion: "0.13.0",
+			ArtifactSHA256:  map[string]string{"arm64": "..."}, // that release's sha256 for openbao-hostcert_0.13.0_linux_arm64.tar.gz
+			Address:         "https://openbao.example.internal",
+			Namespace:       "example",
+			AuthMount:       "aws",
+			AuthRole:        "router-host",
+			ServerIDHeader:  "example-openbao-aws-host",
+			SSHMount:        "ssh-host",
+			SSHRole:         "router",
+			PrincipalPatterns: []string{
+				"ip-10-0-*.tailnet.example.ts.net", // this fleet's own VPC CIDR, never the whole tailnet
+			},
+		},
 	})
 
 	return err
@@ -256,6 +274,7 @@ func routerFleet(
 | `TrustedUserCAKeys` | empty (off) | OpenSSH user-CA public keys, one `authorized_keys`-format line each, written to `/etc/ssh/trusted-user-ca-keys.pub`. Requires `AuthorizedPrincipals` |
 | `AuthorizedPrincipals` | empty (off) | login user → the certificate principals that may log in as it, written to `/etc/ssh/authorized_principals/<user>`. Requires `TrustedUserCAKeys` |
 | `OPKSSH` | `nil` (off) | optional OIDC sign-in via [opkssh](https://github.com/openpubkey/opkssh), additive to `TrustedUserCAKeys`/`AuthorizedPrincipals` — see `OPKSSHConfig` below |
+| `HostCert` | `nil` (off) | optional SSH host-certificate renewal via [truvity/openbao](https://github.com/truvity/openbao)'s `cmd/openbao-hostcert`, additive to everything above — see `HostCertConfig` below |
 | `RouterSetupVersion` | *required* | `"X.Y.Z"` (no leading `v`) — the truvity/tailscale release the bootstrap downloads `router-setup.sh` from; normally the version this `go.mod` pins |
 
 ### `OPKSSHConfig`
@@ -273,6 +292,29 @@ ahead of flipping the one field that turns it on.
 | `SELinuxModuleURL`, `SELinuxModuleSHA256` | `opkssh.te` at the same tag — AL2023 runs SELinux enforcing and this module ships in neither the binary nor the rpm |
 | `Providers` | `[]OPKSSHProvider{Issuer, ClientID, Expiration}` — one `/etc/opk/providers` line each, in order. `Issuer` must be an absolute `https://` URL; `ClientID` and `Expiration` must be plain tokens (no whitespace or shell metacharacters); `Expiration` must be one of opkssh's own policies (`12h`, `24h`, `48h`, `1week`, `oidc`, `oidc-refreshed`) |
 | `AuthorizedIdentities` | `[]OPKSSHAuthID{User, Group, Issuer}` — one `/etc/opk/auth_id` line each, in order, admitting `User` to sign in as `oidc:groups:Group` when `Issuer` signed the ID token. `User` must be a plain login name and not `root`; `Group` must be a plain token (no whitespace or shell metacharacters — refused outright, never escaped); `Issuer` must be one of `Providers`' issuers |
+
+### `HostCertConfig`
+
+`nil`, or `Enabled: false`, is the default: host-certificate renewal is off
+and the user data is byte-for-byte what it would be without this input. Set
+`Enabled: true` once every other field is populated, the same staged-rollout
+convention `OPKSSHConfig` takes.
+
+| Field | Notes |
+|---|---|
+| `Enabled` | off by default |
+| `ArtifactVersion` | the truvity/openbao release, e.g. `"0.13.0"` (no leading `v`) — the same shape `RouterSetupVersion` takes |
+| `ArtifactSHA256` | `map[string]string`, keyed by `GOARCH` (`"arm64"`, ...) — the `openbao-hostcert_<version>_linux_<arch>.tar.gz` archive's sha256. This package deploys `arm64` only (see "The image lookup" above), so only that key is ever read; a missing or malformed entry for it is refused |
+| `Address` | the OpenBAO server's URL — an absolute `https://` URL with no trailing slash |
+| `CABundle` | a PEM certificate bundle to trust beyond AL2023's OS roots; empty is the OS trust store alone. When set, must parse as a real PEM certificate |
+| `Namespace` | the OpenBAO namespace the AWS IAM login and the sign call are both made in; empty is root |
+| `AuthMount`, `AuthRole` | the AWS IAM auth mount's path and the role this router's instance role ARN is bound to (server-side, not this package's business — these only have to match it) |
+| `ServerIDHeader` | the mount's pinned `iam_server_id_header_value`, exactly |
+| `SSHMount`, `SSHRole` | the SSH host-CA mount and role the certificate is signed with |
+| `PrincipalPatterns` | `[]string`, `path.Match` globs — `openbao-hostcert`'s own `--principal-pattern`, refusing to even request a principal outside them (defense in depth: OpenBAO's SSH secrets engine cannot restrict a host role's domain by CIDR or glob — see [safety.md](safety.md#host-certificate-renewal-the-principal-pattern-is-the-real-boundary)). Required; a pattern may not be empty or a bare `"*"` |
+
+Every field is a plain token (no whitespace or shell metacharacters — refused
+outright, never escaped), the same discipline `OPKSSHConfig`'s tokens take.
 
 The result, `*TailscaleInstanceResult`, carries `SecurityGroupID`,
 `InstanceProfileID`, `LaunchTemplateID` and `ASGID`.
@@ -310,8 +352,8 @@ deliberately small. It:
   needs headroom for;
 - writes this router's own small values and feature flags to
   `/etc/tailscale-router/router.env`, plus — only when set —
-  `TrustedUserCAKeys`/`AuthorizedPrincipals` or `OPKSSH`'s
-  providers/auth_id lines, as small literal files alongside it;
+  `TrustedUserCAKeys`/`AuthorizedPrincipals`, `OPKSSH`'s providers/auth_id
+  lines, or `HostCert`'s CA bundle, as small literal files alongside it;
 - downloads `router-setup.sh` from a URL keyed by `RouterSetupVersion`,
   checks it against a pinned sha256, and runs it — fail closed: a
   download failure or a checksum mismatch is logged and skipped, never a
@@ -365,17 +407,47 @@ optional features:
   files above (never touched by this step), exactly as they were.
   `AuthorizedKeysCommand` and `TrustedUserCAKeys` are independent sshd
   mechanisms, so opkssh is additive regardless of whether certificate login
-  is also set.
+  is also set;
+- when `HOST_CERT=true`: downloads the pinned `openbao-hostcert` archive for
+  this package's own architecture (`arm64` — see "The image lookup" above)
+  and verifies it against its configured sha256 — a mismatch aborts, fail
+  closed, the same as opkssh's downloads. It installs the binary at
+  `/usr/local/bin/openbao-hostcert`, the systemd service and timer (their
+  content lives in `router-setup.sh` itself, not a second checksummed
+  download), and `/etc/openbao-hostcert/hostcert.env` (mode `0600`) with
+  the mount/role/address configuration renamed from `HOST_CERT_*` to the
+  `OPENBAO_HOSTCERT_*` names the binary reads — everything except the
+  principal, which is never baked in at cloud-init time (an
+  as-yet-unlaunched instance's eventual tailnet hostname is not knowable
+  then). A small wrapper,
+  `/usr/local/sbin/openbao-hostcert-run.sh`, derives it instead, fresh on
+  every run, from `tailscale status --peers=false --json`
+  (`--peers=false` keeps `"DNSName"` to exactly one match, so a plain
+  `grep`/`sed` needs no JSON parser and no new package — AL2023 already
+  has both, and `tailscale` is this package's own reason to exist), and
+  execs the binary with `--principal`. Then it adds
+  `/etc/ssh/sshd_config.d/70-hostcert.conf` (`HostCertificate
+  /etc/ssh/ssh_host_ed25519_key-cert.pub`), runs `sshd -t`, and on success
+  enables the timer — on failure, removes only this drop-in, the same
+  rollback contract opkssh's own failure takes. The timer fires ~5 minutes
+  after boot, then every 12 hours with up to 10 minutes of jitter; see
+  [safety.md](safety.md#host-certificate-renewal-the-principal-pattern-is-the-real-boundary)
+  for why `PrincipalPatterns` — not this package, not the OpenBAO role —
+  is what actually stops a certificate from being trusted for the wrong
+  host.
 
-With neither `TrustedUserCAKeys`/`AuthorizedPrincipals` nor `OPKSSH` set, the
-router's effective configuration — every file sshd and systemd actually
-read, and their content and mode — is unchanged from before this split;
-`pkg/awsrouter/router_setup_test.go` runs `router-setup.sh` for real (real
-bash, a throwaway root, no golden-string matching) and checks exactly this.
+With neither `TrustedUserCAKeys`/`AuthorizedPrincipals`, `OPKSSH`, nor
+`HostCert` set, the router's effective configuration — every file sshd and
+systemd actually read, and their content and mode — is unchanged from
+before this split; `pkg/awsrouter/router_setup_test.go` runs
+`router-setup.sh` for real (real bash, a throwaway root, no golden-string
+matching) and checks exactly this.
 
-EC2 refuses user data over 16 KiB. Before this split, a real router with
-both certificate login and opkssh configured rendered 16,120 of those 16,384
-bytes; `pkg/awsrouter/userdata_test.go`'s `TestUserDataFitsEC2Limit` now
-checks every combination of features against an 8 KiB generous limit, since
-almost everything that used to count against the 16 KiB limit is now inside
-the downloaded, version-pinned `router-setup.sh` instead.
+EC2 refuses user data over 16 KiB. Before the bootstrap split, a real router
+with both certificate login and opkssh configured rendered 16,120 of those
+16,384 bytes; `pkg/awsrouter/userdata_test.go`'s `TestUserDataFitsEC2Limit`
+checks every combination of features — `HostCert`'s own CA bundle included,
+a full PEM certificate whose size is the caller's to supply, not this
+package's to bound — against a 12 KiB generous limit, since almost
+everything that used to count against the 16 KiB limit is now inside the
+downloaded, version-pinned `router-setup.sh` instead.

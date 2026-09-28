@@ -94,6 +94,19 @@ write_files:
       OPKSSH_SELINUX_URL="{{ .OPKSSH.SELinuxModuleURL }}"
       OPKSSH_SELINUX_SHA256="{{ .OPKSSH.SELinuxModuleSHA256 }}"
 {{- end }}
+      HOST_CERT="{{ if .HostCert }}true{{ else }}false{{ end }}"
+{{- if .HostCert }}
+      HOST_CERT_ARTIFACT_VERSION="{{ .HostCert.ArtifactVersion }}"
+      HOST_CERT_ARTIFACT_SHA256="{{ .HostCertSHA256 }}"
+      HOST_CERT_ADDRESS="{{ .HostCert.Address }}"
+      HOST_CERT_NAMESPACE="{{ .HostCert.Namespace }}"
+      HOST_CERT_AUTH_MOUNT="{{ .HostCert.AuthMount }}"
+      HOST_CERT_AUTH_ROLE="{{ .HostCert.AuthRole }}"
+      HOST_CERT_SERVER_ID_HEADER="{{ .HostCert.ServerIDHeader }}"
+      HOST_CERT_SSH_MOUNT="{{ .HostCert.SSHMount }}"
+      HOST_CERT_SSH_ROLE="{{ .HostCert.SSHRole }}"
+      HOST_CERT_PRINCIPAL_PATTERNS="{{ .HostCertPrincipalPatterns }}"
+{{- end }}
 {{- if .SSHUserCA }}
 
   # SSH user certificates only (ssh.go); router-setup.sh copies these
@@ -133,6 +146,19 @@ write_files:
     content: |
 {{- range .OPKSSH.AuthorizedIdentities }}
       {{ .User }} oidc:groups:{{ .Group }} {{ .Issuer }}
+{{- end }}
+{{- end }}
+{{- if .HostCertCABundleLines }}
+
+  # hostcert.go: the OpenBAO server's CA bundle, staged for
+  # router-setup.sh to pass as openbao-hostcert's --ca-cert. Absent
+  # entirely when HostCert.CABundle is empty (the OS trust store
+  # alone) — router-setup.sh checks for this file, not a flag.
+  - path: /etc/tailscale-router/hostcert-ca.pem
+    permissions: "0644"
+    content: |
+{{- range .HostCertCABundleLines }}
+      {{ . }}
 {{- end }}
 {{- end }}
 

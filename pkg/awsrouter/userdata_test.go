@@ -262,18 +262,25 @@ func TestValidateSSHUserCA(t *testing.T) {
 // generous headroom, not the tight margin the pre-split design needed.
 func TestUserDataFitsEC2Limit(t *testing.T) {
 	const ec2UserDataLimit = 16 * 1024
-	const generousLimit = 8 * 1024
+	// 12 KiB, not 8: HostCert's own CA bundle (a full PEM certificate,
+	// staged verbatim) is the one input here whose size is not this
+	// package's to bound — an estate supplies whatever chain its
+	// OpenBAO server needs. Still a third under EC2's real limit.
+	const generousLimit = 12 * 1024
 
 	c := sshCAConfig(t)
 	c.OPKSSH = opksshConfig(t).OPKSSH
+	c.HostCert = hostCertConfig(t).HostCert
 	require.NoError(t, c.validateSSHUserCA())
 	require.NoError(t, c.validateOPKSSH())
+	require.NoError(t, c.validateHostCert())
 
 	for name, cfg := range map[string]TailscaleInstanceConfig{
-		"default":              exampleConfig(),
-		"ssh-user-ca":          sshCAConfig(t),
-		"opkssh":               opksshConfig(t),
-		"ssh-user-ca + opkssh": c,
+		"default":                         exampleConfig(),
+		"ssh-user-ca":                     sshCAConfig(t),
+		"opkssh":                          opksshConfig(t),
+		"hostcert":                        hostCertConfig(t),
+		"ssh-user-ca + opkssh + hostcert": c,
 	} {
 		size := len(buildTailscaleUserData(cfg))
 		msg := "%s user data is %d bytes; want under %d (EC2's own hard limit is %d)"

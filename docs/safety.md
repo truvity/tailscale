@@ -215,6 +215,57 @@ aws autoscaling terminate-instance-in-auto-scaling-group \
 or roll the whole fleet with
 `aws autoscaling start-instance-refresh --auto-scaling-group-name <environment>-tailscale-<tailnet>`.
 
+## Host-certificate renewal: the principal pattern is the real boundary
+
+`HostCertConfig` lets a router sign its own SSH host key with a
+short-lived certificate from an OpenBAO AWS IAM auth login
+(`truvity/openbao`'s `cmd/openbao-hostcert`), so a client trusts one
+`@cert-authority <domains> <key>` line instead of pinning every router's
+own host key. What it does NOT do, on its own, is stop that certificate
+from being trusted for the WRONG host.
+
+**OpenBAO's SSH secrets engine has no CIDR- or glob-aware way to
+restrict a host role's domain** — checked against OpenBAO's own source
+(`internal/builtin/logical/ssh/path_issue_sign.go`'s
+`validateValidPrincipalForHosts`): a host role's `allowedDomains`
+matches a requested principal by exact string equality or by DNS
+suffix, never a wildcard or a pattern. If two environments' routers
+share one tailnet domain suffix — likely, since a tailnet is usually
+one domain for every environment on it — OpenBAO itself cannot stop a
+login authenticated as environment A's router from requesting (and
+getting signed) a certificate whose principal merely *looks like*
+environment B's hostname. The AWS IAM auth role bound to that login
+already scopes WHO may authenticate (one instance role's ARN); it does
+not scope WHAT hostname a successful login may then ask to be
+certified for.
+
+**`PrincipalPatterns` is where this actually gets stopped, and it is
+enforced on the ASKING side, not the signing side.**
+`cmd/openbao-hostcert`'s `--principal-pattern` refuses to even send a
+sign request for a principal outside the configured glob(s) — this
+package's own `HostCertConfig.PrincipalPatterns` populates it. That is
+defense in depth on a router that is behaving correctly; it is not what
+stops a COMPROMISED router (one that could rewrite its own principal
+argument) from asking anyway. The boundary that survives that case is
+the CLIENT's own trust: an OpenSSH `known_hosts` `@cert-authority` line
+DOES support glob patterns, unlike OpenBAO's role, so scoping each
+environment's client trust to that environment's own VPC CIDR (never
+the whole tailnet domain) means a client refuses a wrong-environment
+certificate even if OpenBAO signed it. Never write a client trust line
+as `@cert-authority *.<tailnet-domain> <one environment's CA key>` —
+scope it to that environment's own address range instead. (The
+consuming estate's own docs are where that pattern is actually
+rendered and published; this package only carries the value through.)
+
+**Fail-safe either way.** A missed renewal, a refused login, a refused
+sign or a `--principal-pattern` refusal all leave whatever certificate
+(or none) was already on disk untouched — sshd keeps serving the plain
+host key, never a lockout. `router-setup.sh`'s own install of the
+binary, units and sshd drop-in follows the identical fail-closed
+contract opkssh's install already does: a checksum mismatch or a
+failing `sshd -t` rolls back only the host-certificate drop-in, never
+the router's other SSH paths.
+
 ## Traps worth knowing
 
 ### The image follows the newest match
