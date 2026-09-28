@@ -78,6 +78,7 @@ ASG_NAME="example-tailscale-acme"
 LIFECYCLE_HOOK_NAME="example-tailscale-acme-launch"
 SSH_USER_CA="false"
 OPKSSH="false"
+HOST_CERT="false"
 `
 
 // noopSystemFuncs stubs every operation that needs a real AL2023 host
@@ -105,6 +106,15 @@ fetch_verify() {
   # network.
   echo "fetch_verify $*" >> "$ROOT/calls.log"
   printf 'fixture-content-for:%s\n' "$1" > "$2"
+  return 0
+}
+extract_binary() {
+  # $1=archive $2=destdir $3=member — fetch_verify's own fixture is not
+  # a real tar.gz, so this simulates a successful extraction the same
+  # deterministic way: fixture bytes naming the archive, at the member
+  # name the caller asked for.
+  echo "extract_binary $*" >> "$ROOT/calls.log"
+  printf 'fixture-binary-for:%s\n' "$1" > "$2/$3"
   return 0
 }
 `
@@ -162,6 +172,10 @@ func TestRouterSetupDefaultEffectiveConfig(t *testing.T) {
 	mustNotExist(t, filepath.Join(root, "etc/ssh/trusted-user-ca-keys.pub"))
 	mustNotExist(t, filepath.Join(root, "etc/opk/providers"))
 	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/60-opk-ssh.conf"))
+	mustNotExist(t, filepath.Join(root, "usr/local/bin/openbao-hostcert"))
+	mustNotExist(t, filepath.Join(root, "etc/openbao-hostcert/hostcert.env"))
+	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf"))
+	mustNotExist(t, filepath.Join(root, "etc/systemd/system/openbao-hostcert.timer"))
 
 	calls := mustRead(t, filepath.Join(root, "calls.log"))
 	assert.Contains(t, calls, "fw --permanent --zone=public --add-interface=ens5")
@@ -169,6 +183,7 @@ func TestRouterSetupDefaultEffectiveConfig(t *testing.T) {
 	assert.NotContains(t, calls, "remove-service=ssh")
 	assert.NotContains(t, calls, "pkg_remove ec2-instance-connect")
 	assert.NotContains(t, calls, "ensure_user_group")
+	assert.NotContains(t, calls, "extract_binary")
 }
 
 // ── SSH user certificates ──────────────────────────────────────────────
@@ -347,6 +362,152 @@ selinux_load_module() { echo "selinux_load_module $*" >> "$ROOT/calls.log"; retu
 	root2, out := routerSetupHarness(t, opksshEnv(), staged, failing)
 	assert.Contains(t, out, "opkssh selinux fail")
 	mustNotExist(t, filepath.Join(root2, "etc/ssh/sshd_config.d/60-opk-ssh.conf"))
+}
+
+// ── SSH host-certificate renewal (hostcert.go) ──────────────────────────
+
+func hostCertEnv() string {
+	env := strings.Replace(baseEnv, `HOST_CERT="false"`, `HOST_CERT="true"`, 1)
+	env += `HOST_CERT_ARTIFACT_VERSION="0.13.0"
+HOST_CERT_ARTIFACT_SHA256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+HOST_CERT_ADDRESS="https://openbao.example.internal"
+HOST_CERT_NAMESPACE="example"
+HOST_CERT_AUTH_MOUNT="aws"
+HOST_CERT_AUTH_ROLE="router-host"
+HOST_CERT_SERVER_ID_HEADER="example-openbao-aws-host"
+HOST_CERT_SSH_MOUNT="ssh-host"
+HOST_CERT_SSH_ROLE="router"
+HOST_CERT_PRINCIPAL_PATTERNS="ip-10-0-*.tailnet.example.ts.net"
+`
+
+	return env
+}
+
+func TestRouterSetupHostCertInstall(t *testing.T) {
+	staged := map[string]string{
+		"hostcert-ca.pem": "-----BEGIN CERTIFICATE-----\nexample\n-----END CERTIFICATE-----\n",
+	}
+
+	root, _ := routerSetupHarness(t, hostCertEnv(), staged, noopSystemFuncs)
+
+	bin := filepath.Join(root, "usr/local/bin/openbao-hostcert")
+	assert.Contains(t, mustRead(t, bin), "fixture-binary-for:")
+	info, err := os.Stat(bin)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+
+	assert.Equal(t, staged["hostcert-ca.pem"], mustRead(t, filepath.Join(root, "etc/openbao-hostcert/ca.pem")))
+
+	env := mustRead(t, filepath.Join(root, "etc/openbao-hostcert/hostcert.env"))
+	for _, want := range []string{
+		"OPENBAO_HOSTCERT_ADDRESS=https://openbao.example.internal",
+		"OPENBAO_HOSTCERT_NAMESPACE=example",
+		"OPENBAO_HOSTCERT_AUTH_MOUNT=aws",
+		"OPENBAO_HOSTCERT_AUTH_ROLE=router-host",
+		"OPENBAO_HOSTCERT_SERVER_ID_HEADER=example-openbao-aws-host",
+		"OPENBAO_HOSTCERT_SSH_MOUNT=ssh-host",
+		"OPENBAO_HOSTCERT_SSH_ROLE=router",
+		"OPENBAO_HOSTCERT_PRINCIPAL_PATTERNS=ip-10-0-*.tailnet.example.ts.net",
+		"OPENBAO_HOSTCERT_PUBLIC_KEY=/etc/ssh/ssh_host_ed25519_key.pub",
+		"OPENBAO_HOSTCERT_CERT_PATH=/etc/ssh/ssh_host_ed25519_key-cert.pub",
+		"OPENBAO_HOSTCERT_RELOAD_CMD=systemctl reload sshd",
+		"OPENBAO_HOSTCERT_CA_CERT=/etc/openbao-hostcert/ca.pem",
+	} {
+		assert.Contains(t, env, want)
+	}
+	assert.NotContains(t, env, "OPENBAO_HOSTCERT_PRINCIPALS=", "the wrapper supplies --principal itself, fresh, every run")
+
+	info, err = os.Stat(filepath.Join(root, "etc/openbao-hostcert/hostcert.env"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+	wrapper := mustRead(t, filepath.Join(root, "usr/local/sbin/openbao-hostcert-run.sh"))
+	assert.Contains(t, wrapper, `tailscale status --peers=false --json`)
+	assert.Contains(t, wrapper, `exec /usr/local/bin/openbao-hostcert --principal "$PRINCIPAL"`)
+	info, err = os.Stat(filepath.Join(root, "usr/local/sbin/openbao-hostcert-run.sh"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+
+	assert.Contains(t, mustRead(t, filepath.Join(root, "etc/systemd/system/openbao-hostcert.service")), "EnvironmentFile=/etc/openbao-hostcert/hostcert.env")
+	assert.Contains(t, mustRead(t, filepath.Join(root, "etc/systemd/system/openbao-hostcert.timer")), "OnUnitActiveSec=12h")
+
+	assert.Equal(t, "HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub\n", mustRead(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf")))
+
+	calls := mustRead(t, filepath.Join(root, "calls.log"))
+	assert.Contains(t, calls, "sshd_check")
+	assert.Contains(t, calls, "svc_enable_now openbao-hostcert.timer")
+}
+
+func TestRouterSetupHostCertNoCABundleSkipsCACert(t *testing.T) {
+	root, _ := routerSetupHarness(t, hostCertEnv(), nil, noopSystemFuncs)
+
+	mustNotExist(t, filepath.Join(root, "etc/openbao-hostcert/ca.pem"))
+	env := mustRead(t, filepath.Join(root, "etc/openbao-hostcert/hostcert.env"))
+	assert.NotContains(t, env, "OPENBAO_HOSTCERT_CA_CERT")
+}
+
+// A checksum mismatch fails closed: nothing is installed, and the sshd
+// drop-in is never created.
+func TestRouterSetupHostCertChecksumMismatchFailsClosed(t *testing.T) {
+	badFetch := noopSystemFuncs + `
+fetch_verify() { echo "fetch_verify $*" >> "$ROOT/calls.log"; return 1; }
+`
+
+	root, out := routerSetupHarness(t, hostCertEnv(), nil, badFetch)
+
+	assert.Contains(t, out, "hostcert checksum fail")
+	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf"))
+	mustNotExist(t, filepath.Join(root, "usr/local/bin/openbao-hostcert"))
+
+	calls := mustRead(t, filepath.Join(root, "calls.log"))
+	assert.NotContains(t, calls, "extract_binary")
+	assert.NotContains(t, calls, "sshd_check", "a failed download must never reach the sshd -t gate")
+}
+
+// sshd -t failing after an otherwise-successful install removes only
+// the hostcert drop-in — the binary, units and env file are left in
+// place, the same rollback contract setup_opkssh's own failure takes.
+func TestRouterSetupHostCertBadSSHDConfigRemovesDropIn(t *testing.T) {
+	failingSSHD := noopSystemFuncs + `
+sshd_check() { echo "sshd_check" >> "$ROOT/calls.log"; return 1; }
+`
+
+	root, out := routerSetupHarness(t, hostCertEnv(), nil, failingSSHD)
+
+	assert.Contains(t, out, "sshd -t failed")
+	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf"))
+	assert.FileExists(t, filepath.Join(root, "usr/local/bin/openbao-hostcert"))
+	assert.FileExists(t, filepath.Join(root, "etc/openbao-hostcert/hostcert.env"))
+
+	calls := mustRead(t, filepath.Join(root, "calls.log"))
+	assert.NotContains(t, calls, "svc_enable_now openbao-hostcert.timer", "a failing sshd -t must never be followed by enabling the timer")
+}
+
+// Independent of certificate login and opkssh: all three install
+// cleanly together, each exactly as it does alone.
+func TestRouterSetupHostCertWithSSHUserCAAndOPKSSH(t *testing.T) {
+	env := strings.Replace(hostCertEnv(), `SSH_USER_CA="false"`, `SSH_USER_CA="true"`, 1)
+	env = strings.Replace(env, `OPKSSH="false"`, `OPKSSH="true"`, 1)
+	env += `OPKSSH_ARTIFACT_VERSION="0.16.0"
+OPKSSH_ARTIFACT_URL="https://github.com/openpubkey/opkssh/releases/download/v0.16.0/opkssh-linux-arm64"
+OPKSSH_ARTIFACT_SHA256="9dd10c2b6ce99cde18e52c054877ca014134b291fd82afe71741c68db4f83d44"
+OPKSSH_SELINUX_URL="https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/opkssh.te"
+OPKSSH_SELINUX_SHA256="f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb9546926c4"
+`
+
+	staged := map[string]string{
+		"trusted-user-ca-keys.pub":       "ssh-ed25519 AAAAexample current\n",
+		"authorized_principals/ec2-user": "ec2-user\n",
+		"opkssh-providers":               "https://access.example.com opkssh 24h\n",
+		"opkssh-auth_id":                 "ec2-user oidc:groups:ssh-admins https://access.example.com\n",
+	}
+
+	root, _ := routerSetupHarness(t, env, staged, noopSystemFuncs)
+
+	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
+	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/60-opk-ssh.conf"))
+	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf"))
+	assert.FileExists(t, filepath.Join(root, "usr/local/bin/openbao-hostcert"))
 }
 
 // ── router-setup.sh's own checksum, as pinned by the bootstrap ─────────

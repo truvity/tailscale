@@ -1,8 +1,9 @@
 #!/bin/bash
 # router-setup.sh — the Tailscale subnet router's setup logic: chrony,
 # audit rules, persistent journald, sshd hardening, the tailnet repo and
-# join unit, optional SSH user-certificate login (ssh.go), and optional
-# opkssh OIDC sign-in (opkssh.go).
+# join unit, optional SSH user-certificate login (ssh.go), optional
+# opkssh OIDC sign-in (opkssh.go), and optional SSH host-certificate
+# renewal via truvity/openbao's cmd/openbao-hostcert (hostcert.go).
 #
 # GENERIC and VERSION-PINNED. Every router — any environment, any
 # tailnet, with or without the optional features — downloads this SAME
@@ -17,7 +18,7 @@
 # (docs/safety.md, "The bootstrap split").
 #
 # Per-router values (region, routes, the SSM auth-key path, ASG/hook
-# names) and feature flags (SSH_USER_CA, OPKSSH) come from
+# names) and feature flags (SSH_USER_CA, OPKSSH, HOST_CERT) come from
 # $ROUTER_SETUP_ROOT/etc/tailscale-router/router.env, written by
 # cloud-init — never from arguments or from Go templating in this file.
 # A few small, literal, per-router files sit alongside it (the CA public
@@ -93,6 +94,13 @@ fetch_verify() {
   local url="$1" dest="$2" want="$3"
   curl -fsSL -o "$dest" "$url" || return 1
   printf '%s  %s\n' "$want" "$dest" | sha256sum -c - >/dev/null 2>&1
+}
+# extract_binary pulls $3 (a member name) out of $1 (a .tar.gz already
+# fetch_verify'd) into $2 (a directory). Its own function, like
+# fetch_verify, so a test can stub it: the fixture bytes fetch_verify's
+# own test stub writes are not a real archive.
+extract_binary() {
+  tar -xzf "$1" -C "$2" "$3"
 }
 
 # ── Static configuration (identical on every router) ──────────────────
@@ -385,6 +393,153 @@ EOF
   fi
 }
 
+# ── SSH host-certificate renewal (hostcert.go) — additive, sshd keeps ──
+# serving the plain host key either way
+#
+# truvity/openbao's cmd/openbao-hostcert does the actual OpenBAO login
+# and signing, on a timer; this function's only job is getting it
+# installed, configured and enabled, fail-closed the same way
+# setup_opkssh is: a bad checksum or a failing sshd -t leaves the
+# certificate path untouched and does not stop the router from working
+# otherwise.
+setup_hostcert() {
+  local d c archive ca_cert_line
+  d="$ROOT/tmp/hostcert-install"
+  c="$ROOT/etc/ssh/sshd_config.d/70-hostcert.conf"
+  mkdir -p "$d"
+
+  fail() {
+    log "hostcert $1 fail"
+    rm -f "$c"
+  }
+
+  # Only one architecture is ever downloaded: this package's own AMI is
+  # always arm64 (router.go's LookupAmi) — HOST_CERT_ARTIFACT_SHA256 is
+  # already the resolved digest for it, computed Go-side
+  # (hostcert.go's hostCertArtifactSHA256), not a map read here.
+  archive="openbao-hostcert_${HOST_CERT_ARTIFACT_VERSION}_linux_arm64.tar.gz"
+  if ! fetch_verify \
+    "https://github.com/truvity/openbao/releases/download/v${HOST_CERT_ARTIFACT_VERSION}/${archive}" \
+    "$d/$archive" "$HOST_CERT_ARTIFACT_SHA256"; then
+    fail "checksum"
+    return 0
+  fi
+
+  mkdir -p "$ROOT/usr/local/bin"
+  if ! extract_binary "$d/$archive" "$ROOT/usr/local/bin" openbao-hostcert; then
+    fail "extract"
+    return 0
+  fi
+  chmod 0755 "$ROOT/usr/local/bin/openbao-hostcert"
+
+  mkdir -p "$ROOT/etc/openbao-hostcert"
+  chmod 0700 "$ROOT/etc/openbao-hostcert"
+
+  # The OpenBAO server's CA bundle, when HostCert.CABundle staged one —
+  # copied to its final location, never referenced in place, the same
+  # convention ssh.go's trusted-user-ca-keys.pub follows.
+  ca_cert_line=""
+  if [ -f "$CONF_DIR/hostcert-ca.pem" ]; then
+    install -m 0644 "$CONF_DIR/hostcert-ca.pem" "$ROOT/etc/openbao-hostcert/ca.pem"
+    ca_cert_line="OPENBAO_HOSTCERT_CA_CERT=/etc/openbao-hostcert/ca.pem"
+  fi
+
+  # Renamed from this script's own HOST_CERT_* names (router.env) to the
+  # OPENBAO_HOSTCERT_* names the binary itself reads
+  # (cmd/openbao-hostcert/main.go) — two different files because
+  # router.env is cloud-init's, written once at boot, and this one is
+  # what the SYSTEMD SERVICE reads every run, on its own schedule, long
+  # after cloud-init is done. OPENBAO_HOSTCERT_PRINCIPALS is
+  # deliberately absent: openbao-hostcert-run.sh (below) supplies
+  # --principal itself, fresh, every run.
+  cat >"$ROOT/etc/openbao-hostcert/hostcert.env" <<EOF
+OPENBAO_HOSTCERT_ADDRESS=$HOST_CERT_ADDRESS
+OPENBAO_HOSTCERT_NAMESPACE=$HOST_CERT_NAMESPACE
+OPENBAO_HOSTCERT_AUTH_MOUNT=$HOST_CERT_AUTH_MOUNT
+OPENBAO_HOSTCERT_AUTH_ROLE=$HOST_CERT_AUTH_ROLE
+OPENBAO_HOSTCERT_SERVER_ID_HEADER=$HOST_CERT_SERVER_ID_HEADER
+OPENBAO_HOSTCERT_SSH_MOUNT=$HOST_CERT_SSH_MOUNT
+OPENBAO_HOSTCERT_SSH_ROLE=$HOST_CERT_SSH_ROLE
+OPENBAO_HOSTCERT_PRINCIPAL_PATTERNS=$HOST_CERT_PRINCIPAL_PATTERNS
+OPENBAO_HOSTCERT_PUBLIC_KEY=/etc/ssh/ssh_host_ed25519_key.pub
+OPENBAO_HOSTCERT_CERT_PATH=/etc/ssh/ssh_host_ed25519_key-cert.pub
+OPENBAO_HOSTCERT_RELOAD_CMD=systemctl reload sshd
+$ca_cert_line
+EOF
+  chmod 0600 "$ROOT/etc/openbao-hostcert/hostcert.env"
+
+  # The wrapper every run actually execs: it derives THIS router's own
+  # tailnet hostname fresh, every time, from `tailscale status` — never
+  # a value baked in at cloud-init time, which cannot know what
+  # hostname a not-yet-launched instance will get. No new package:
+  # grep/sed are already on AL2023, and `tailscale` is this package's
+  # own reason to exist. --peers=false keeps "DNSName" to exactly one
+  # match (this router's own), so the grep needs no JSON parser.
+  mkdir -p "$ROOT/usr/local/sbin"
+  cat >"$ROOT/usr/local/sbin/openbao-hostcert-run.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+PRINCIPAL=$(tailscale status --peers=false --json 2>/dev/null \
+  | grep -o '"DNSName": *"[^"]*"' | head -1 | sed -E 's/.*"DNSName": *"([^"]*)".*/\1/; s/\.$//')
+if [ -z "$PRINCIPAL" ]; then
+  echo "openbao-hostcert-run: tailscale status gave no DNSName (not joined yet?)" >&2
+  exit 1
+fi
+exec /usr/local/bin/openbao-hostcert --principal "$PRINCIPAL"
+EOF
+  chmod 0755 "$ROOT/usr/local/sbin/openbao-hostcert-run.sh"
+
+  # The systemd unit content lives here, not a second checksummed
+  # download: two small, static files, reviewed the same way every
+  # other line in this script is, at this script's own release cadence
+  # — see hostcert.go's own doc comment for why.
+  mkdir -p "$ROOT/etc/systemd/system"
+  cat >"$ROOT/etc/systemd/system/openbao-hostcert.service" <<'EOF'
+[Unit]
+Description=Renew this router's SSH host certificate from OpenBAO
+After=network-online.target tailscale-join.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/openbao-hostcert/hostcert.env
+ExecStart=/usr/local/sbin/openbao-hostcert-run.sh
+User=root
+Group=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/ssh
+PrivateTmp=yes
+EOF
+
+  cat >"$ROOT/etc/systemd/system/openbao-hostcert.timer" <<'EOF'
+[Unit]
+Description=Periodic SSH host-certificate renewal (openbao-hostcert)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=12h
+RandomizedDelaySec=10min
+Persistent=true
+Unit=openbao-hostcert.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  cat >"$c" <<'EOF'
+HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub
+EOF
+
+  if sshd_check; then
+    svc_enable_now openbao-hostcert.timer
+    log "hostcert installed"
+  else
+    log "sshd -t failed"
+    rm -f "$c"
+  fi
+}
+
 # ── main ───────────────────────────────────────────────────────────────
 
 main() {
@@ -429,6 +584,10 @@ main() {
 
   if [ "${OPKSSH:-false}" = "true" ]; then
     setup_opkssh
+  fi
+
+  if [ "${HOST_CERT:-false}" = "true" ]; then
+    setup_hostcert
   fi
 
   log "done"

@@ -54,8 +54,6 @@ packages:
   - nmap-ncat
   - tcpdump
   - traceroute
-  # router-setup.sh's opkssh install: checkmodule/semodule_package.
-  - checkpolicy
 
 # ── Boot-time recovery hook ──────────────────────────────────────────
 # bootcmd runs EVERY boot (before write_files on the first boot, where it
@@ -84,28 +82,36 @@ write_files:
       ASG_NAME="example-tailscale-acme"
       LIFECYCLE_HOOK_NAME="example-tailscale-acme-launch"
       SSH_USER_CA="false"
-      OPKSSH="true"
-      OPKSSH_ARTIFACT_VERSION="0.16.0"
-      OPKSSH_ARTIFACT_URL="https://github.com/openpubkey/opkssh/releases/download/v0.16.0/opkssh-linux-arm64"
-      OPKSSH_ARTIFACT_SHA256="9dd10c2b6ce99cde18e52c054877ca014134b291fd82afe71741c68db4f83d44"
-      OPKSSH_SELINUX_URL="https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/opkssh.te"
-      OPKSSH_SELINUX_SHA256="f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb9546926c4"
-      HOST_CERT="false"
+      OPKSSH="false"
+      HOST_CERT="true"
+      HOST_CERT_ARTIFACT_VERSION="0.13.0"
+      HOST_CERT_ARTIFACT_SHA256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      HOST_CERT_ADDRESS="https://openbao.example.internal"
+      HOST_CERT_NAMESPACE="example"
+      HOST_CERT_AUTH_MOUNT="aws"
+      HOST_CERT_AUTH_ROLE="router-host"
+      HOST_CERT_SERVER_ID_HEADER="example-openbao-aws-host"
+      HOST_CERT_SSH_MOUNT="ssh-host"
+      HOST_CERT_SSH_ROLE="router"
+      HOST_CERT_PRINCIPAL_PATTERNS="ip-10-0-*.tailnet.example.ts.net,ip-10-1-*.tailnet.example.ts.net"
 
-  # opkssh.go: additive OIDC sign-in — the exact /etc/opk/{providers,auth_id}
-  # lines, staged; router-setup.sh installs opkssh (own steps — see its
-  # header comment on why it does not run opkssh's upstream
-  # install-linux.sh) then copies these into place with the ownership
-  # and mode opkssh requires.
-  - path: /etc/tailscale-router/opkssh-providers
-    permissions: "0600"
+  # hostcert.go: the OpenBAO server's CA bundle, staged for
+  # router-setup.sh to pass as openbao-hostcert's --ca-cert. Absent
+  # entirely when HostCert.CABundle is empty (the OS trust store
+  # alone) — router-setup.sh checks for this file, not a flag.
+  - path: /etc/tailscale-router/hostcert-ca.pem
+    permissions: "0644"
     content: |
-      https://access.example.com opkssh 24h
-
-  - path: /etc/tailscale-router/opkssh-auth_id
-    permissions: "0600"
-    content: |
-      ec2-user oidc:groups:ssh-admins https://access.example.com
+      -----BEGIN CERTIFICATE-----
+      MIIBWzCCAQGgAwIBAgIBATAKBggqhkjOPQQDAjAVMRMwEQYDVQQKEwpFeGFtcGxl
+      IENBMB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowFTETMBEGA1UEChMK
+      RXhhbXBsZSBDQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABL6fdpIQMq0bdKis
+      TFXqqnU49pjkir8d+1xH5sVrqlFYiylvmEchrvWy3iN2/GaLmZxcKqXgep53fwG/
+      IADH1JSjQjBAMA4GA1UdDwEB/wQEAwIChDAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud
+      DgQWBBT6otk0hCrB+07wNy597W6qWfFmyTAKBggqhkjOPQQDAgNIADBFAiEAt/1c
+      QoOIFM2vdApUw6yOcYxkK8v4E3UZhSv+IFuWUn4CIHhK3QCy/atdEF5cEprFyFE0
+      9nqDCf7K1cVNkX6NjJ07
+      -----END CERTIFICATE-----
 
 # ── Runtime commands ─────────────────────────────────────────────────
 runcmd:

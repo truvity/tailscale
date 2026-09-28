@@ -5,6 +5,36 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. Both charts and the Go module are released
 together at every version.
 
+## v1.13.0
+
+- **`pkg/awsrouter`: optional SSH host-certificate renewal**, via
+  `truvity/openbao`'s `cmd/openbao-hostcert` — a router signs its own
+  SSH host key with a short-lived certificate from an OpenBAO AWS IAM
+  auth login, so a client trusts one `@cert-authority` line instead of
+  pinning every router's own host key. `TailscaleInstanceConfig.HostCert`
+  (`*HostCertConfig`, nil or `Enabled: false` off by default, the same
+  staged-rollout convention `OPKSSHConfig` takes) names the release
+  (`ArtifactVersion`, a per-`GOARCH` `ArtifactSHA256` — this package
+  deploys `arm64` only), the OpenBAO connection (`Address`, `CABundle`,
+  `Namespace`, `AuthMount`, `AuthRole`, `ServerIDHeader`, `SSHMount`,
+  `SSHRole`) and `PrincipalPatterns` — `path.Match` globs
+  `openbao-hostcert`'s own `--principal-pattern` refuses to request a
+  principal outside of. `router-setup.sh` downloads the pinned archive
+  by checksum (fail closed on mismatch, same contract opkssh's own
+  downloads take), installs the binary plus a systemd service and timer
+  whose unit content ships in this script itself (not a second
+  checksummed download), and a small wrapper that derives the router's
+  own tailnet hostname fresh on every run from `tailscale status
+  --peers=false --json` — no new package, `grep`/`sed` are already on
+  AL2023. See `docs/safety.md`'s "Host-certificate renewal: the
+  principal pattern is the real boundary" for why OpenBAO's own SSH
+  secrets engine cannot restrict a host role's domain by CIDR or glob
+  (checked against its source), and why the client's own
+  `@cert-authority` pattern — never the whole tailnet domain for one
+  environment's CA — is what actually closes that gap.
+  `TestUserDataDefaultUnchanged` proves `HostCert` nil renders
+  byte-for-byte what a router without this input renders.
+
 ## v1.11.0
 
 - **Fix: opkssh now installs on Amazon Linux 2023.** v1.10.0's `OPKSSH`

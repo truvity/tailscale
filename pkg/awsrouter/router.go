@@ -117,6 +117,12 @@ type (
 		// input existed.
 		OPKSSH *OPKSSHConfig
 
+		// HostCert configures optional SSH host-certificate renewal via
+		// truvity/openbao's cmd/openbao-hostcert — see hostcert.go. nil,
+		// or HostCert.Enabled false (the default): the user data renders
+		// exactly as it did before this input existed.
+		HostCert *HostCertConfig
+
 		// RouterSetupVersion is the truvity/tailscale release this
 		// router's bootstrap downloads router-setup.sh from — normally
 		// the exact version the caller's own go.mod pins (bootstrap.go).
@@ -151,8 +157,20 @@ type (
 		LifecycleHookName string           // Lifecycle hook name for readiness signal
 		SSHUserCA         *sshUserCAParams // nil: no certificate login (default)
 		OPKSSH            *OPKSSHConfig    // nil: no opkssh sign-in (default)
-		SetupScriptURL    string           // where the bootstrap downloads router-setup.sh from
-		SetupScriptSHA256 string           // pinned digest; a mismatch is refused, fail closed
+		HostCert          *HostCertConfig  // nil: no host-certificate renewal (default)
+		HostCertSHA256    string           // HostCert.ArtifactSHA256[hostCertArch]; empty when HostCert is nil
+		// HostCertPrincipalPatterns is HostCert.PrincipalPatterns,
+		// comma-joined (openbao-hostcert's own --principal-pattern env
+		// var shape) — precomputed here rather than in the template,
+		// which registers no join function.
+		HostCertPrincipalPatterns string
+		// HostCertCABundleLines is HostCert.CABundle split into lines,
+		// so the template can render it the same range-based way
+		// SSHUserCA.TrustedUserCAKeys is rendered. nil when CABundle is
+		// empty.
+		HostCertCABundleLines []string
+		SetupScriptURL        string // where the bootstrap downloads router-setup.sh from
+		SetupScriptSHA256     string // pinned digest; a mismatch is refused, fail closed
 	}
 )
 
@@ -189,6 +207,10 @@ func CreateTailscaleInstance(
 	}
 
 	if err := config.validateOPKSSH(); err != nil {
+		return nil, err
+	}
+
+	if err := config.validateHostCert(); err != nil {
 		return nil, err
 	}
 
@@ -547,17 +569,21 @@ func buildTailscaleUserData(config TailscaleInstanceConfig) string {
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, userDataParams{
-		Region:            config.Region,
-		AdvertiseRoutes:   routes,
-		SSMAuthKeyPath:    config.SSMAuthKeyPath,
-		WireGuardPort:     wireGuardPort,
-		PrimaryInterface:  primaryInterface,
-		ASGName:           config.baseName(),
-		LifecycleHookName: config.baseName() + "-launch",
-		SSHUserCA:         config.sshUserCAParams(),
-		OPKSSH:            config.opksshParams(),
-		SetupScriptURL:    RouterSetupURL(config.RouterSetupVersion),
-		SetupScriptSHA256: RouterSetupSHA256(),
+		Region:                    config.Region,
+		AdvertiseRoutes:           routes,
+		SSMAuthKeyPath:            config.SSMAuthKeyPath,
+		WireGuardPort:             wireGuardPort,
+		PrimaryInterface:          primaryInterface,
+		ASGName:                   config.baseName(),
+		LifecycleHookName:         config.baseName() + "-launch",
+		SSHUserCA:                 config.sshUserCAParams(),
+		OPKSSH:                    config.opksshParams(),
+		HostCert:                  config.hostCertParams(),
+		HostCertSHA256:            config.hostCertArtifactSHA256(),
+		HostCertPrincipalPatterns: config.hostCertPrincipalPatterns(),
+		HostCertCABundleLines:     config.hostCertCABundleLines(),
+		SetupScriptURL:            RouterSetupURL(config.RouterSetupVersion),
+		SetupScriptSHA256:         RouterSetupSHA256(),
 	}); err != nil {
 		// Template is embedded and tested — panic is appropriate for a compile-time error.
 		panic(fmt.Sprintf("render tailscale user-data template: %v", err))
