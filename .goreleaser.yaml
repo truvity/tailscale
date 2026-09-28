@@ -22,3 +22,10 @@ changelog:
 
 release:
   github: {}
+  # pkg/awsrouter's bootstrap user data downloads this exact file by URL
+  # and pins its sha256 (bootstrap.go's go:embed of the same path
+  # computes that digest, so the two are always the same git blob at
+  # this tag — see router-setup.sh's own header comment).
+  extra_files:
+    - glob: ./pkg/awsrouter/router-setup.sh
+      name_template: "router-setup-v{{ .Version }}.sh"

@@ -60,11 +60,11 @@ without creating a resource:
 
 | Refusal | What it prevents |
 |---|---|
-| a missing `ArtifactVersion` | an `install-linux.sh --install-version` with nothing to install |
+| a missing `ArtifactVersion` | an install log line with no version to record |
 | a checksum that is not 64 lowercase hex characters | a typo'd or truncated sha256 that would never match anything, silently forcing every install to fail closed at runtime instead of at plan time |
-| a URL that is not an absolute `https://` URL (`ArtifactURL`, `SELinuxModuleURL`, `InstallScriptURL`, or a `Providers[].Issuer`) | fetching a pinned artifact — or trusting an issuer — over anything looser than https |
+| a URL that is not an absolute `https://` URL (`ArtifactURL`, `SELinuxModuleURL`, or a `Providers[].Issuer`) | fetching a pinned artifact — or trusting an issuer — over anything looser than https |
 | an empty `Providers` | opkssh installed to trust no OpenID Provider |
-| a `Providers[].ClientID` that is empty or not a plain token | a value opkssh's space-delimited `/etc/opk/providers` would read as extra columns, or a shell metacharacter reaching the rendered install script |
+| a `Providers[].ClientID` that is empty or not a plain token | a value opkssh's space-delimited `/etc/opk/providers` would read as extra columns, or a shell metacharacter reaching `router-setup.sh` |
 | a `Providers[].Expiration` that is not one of opkssh's own policies (`12h`, `24h`, `48h`, `1week`, `oidc`, `oidc-refreshed`) | a value opkssh's parser does not recognize |
 | an empty `AuthorizedIdentities` | opkssh installed to admit nobody |
 | an `AuthorizedIdentities[].User` that is not a plain login name, or `root` | the same class of mistake `AuthorizedPrincipals` refuses, for opkssh's principals |
@@ -250,41 +250,54 @@ router.
   old, roll, move signing to the new CA, wait out the longest certificate
   lifetime, remove the old key, and roll again.
 
-### The user data has a size limit
+### The user data has a size limit — and the bootstrap split exists because of it
 
-EC2 refuses user data over 16 KiB, and the SSH inputs are written into it. A
-test keeps two CA keys and two users 1 KiB under the limit; a long principal
-map can still cross it, and then AWS refuses the launch template.
+EC2 refuses user data over 16 KiB. Before v1.11.0, a real router with both
+certificate login and opkssh configured rendered 16,120 of those 16,384
+bytes — 264 bytes of headroom from a hard failure at the next byte added by
+either feature. `pkg/awsrouter/userdata_test.go`'s `TestUserDataFitsEC2Limit`
+now checks every combination against an 8 KiB generous limit: the bootstrap
+(`tailscale_userdata.yaml.gotmpl`) renders only this router's own small
+values and feature flags plus a fetch-and-verify `runcmd`; everything that
+used to be written directly — chrony, audit, journald, sshd hardening, the
+join script and systemd units, and the certificate-login and opkssh
+blocks — now lives in `router-setup.sh`, downloaded once by URL and
+checksum-verified, not re-rendered per router. There is still no way to
+raise EC2's limit; the bootstrap split means almost nothing that varies by
+router counts against it any more.
 
-### pkg/awsrouter: opkssh's tight margin against the 16 KiB limit
+### The bootstrap split: a download must never partially apply
 
-opkssh's own pinned artifacts add real, unavoidable bytes to the user
-data: three URLs and three sha256 digests it must carry to verify them
-before installing (fail closed on a mismatch). Set alone, it still keeps
-the same 1 KiB headroom as the other cases. Stacked on an existing
-one-key certificate login — the realistic shape for a router that already
-has one, since opkssh is meant to be added to it, not to replace it — the
-combined render comes within a few hundred bytes of the hard 16 KiB
-limit, not 1 KiB. `pkg/awsrouter/opkssh_test.go`'s
-`TestUserDataOPKSSHWithCertificateLoginFitsEC2Limit` checks that
-combination against the true limit with a smaller, explicit margin
-instead of the usual convention.
+`router-setup.sh` (`pkg/awsrouter/bootstrap.go`'s `go:embed`, published as
+this release's `router-setup-vX.Y.Z.sh` GitHub Release asset — both are the
+same git blob at the tag, so a consumer's own build always computes the
+right digest without anyone hand-maintaining a checksum) is fetched over
+plain `curl` and checked against that digest before it ever runs
+(`sha256sum -c`). A download failure or a mismatch is logged
+(`router-setup checksum fail`) and the bootstrap's own `runcmd` continues to
+arm the tailnet join regardless — a broken bootstrap must never block the
+one thing that keeps this router reachable at all. Router egress to
+github.com was already required (opkssh's own artifacts come from there);
+this download reuses it, from the same host.
 
-**Consequence for a caller:** keep `OPKSSH.Providers` and
-`OPKSSH.AuthorizedIdentities` minimal (the pilot needs one of each), and do
-not roll an opkssh change during an active CA rotation (`TrustedUserCAKeys`
-carrying two keys, `AuthorizedPrincipals` naming more than one user) without
-re-checking the render's size first — that combination can exceed the hard
-limit outright, which Pulumi/AWS then refuses at apply time, not at preview
-time in every case. There is no way to raise the limit; the only lever is
-what goes into the user data.
+Inside `router-setup.sh` itself, the handful of operations that need a real
+AL2023 host (package removal, service management, SELinux module
+compilation, network fetches) are named functions
+(`pkg_remove`, `svc_*`, `fw`, `sysctl_apply`, `time_step`, `selinux_status`,
+`selinux_load_module`, `ensure_user_group`, `sshd_check`, `fetch_verify`) —
+not because production needs the indirection, but because
+`pkg/awsrouter/router_setup_test.go` overrides them after sourcing the
+script (the same `SHUNIT_RUNNING`-style convention opkssh's own
+`install-linux.sh` uses for its own tests) and runs every other line — the
+actual file-writing logic that determines the router's effective
+configuration — for real, against a throwaway `ROUTER_SETUP_ROOT`.
 
-### pkg/awsrouter: opkssh's home policy is disabled on purpose
+### pkg/awsrouter: opkssh's home policy — structurally disabled, not merely flagged
 
-install-linux.sh defaults to **home policy** (`HOME_POLICY=true`): it lets
-`~<user>/.opk/auth_id` grant that account extra identities on top of
-`/etc/opk/auth_id`, and to make that work it installs
-`/etc/sudoers.d/opkssh` with a passwordless rule
+opkssh's own upstream `install-linux.sh` defaults to **home policy**
+(`HOME_POLICY=true`): it lets `~<user>/.opk/auth_id` grant that account
+extra identities on top of `/etc/opk/auth_id`, and to make that work it
+installs `/etc/sudoers.d/opkssh` with a passwordless rule
 (`opksshuser ALL=(ALL) NOPASSWD: /usr/local/bin/opkssh readhome *`). On a
 router that is the wrong shape: the only policy this estate renders is
 `/etc/opk/auth_id`, from `OPKSSH.AuthorizedIdentities` — a second,
@@ -293,19 +306,17 @@ user (an already-authorized opkssh or certificate identity) grant that
 *same account* extra identities, bypassing the roster-rendered groups
 entirely and outliving whatever revoked the identity that let them in.
 
-`opkssh-install.sh` passes `--no-home-policy` (no sudoers rule, no SELinux
-`opkssh_enable_home` boolean), and then asserts `/etc/sudoers.d/opkssh`
-does **not** exist afterward — refusing and rolling back the opkssh
-drop-in if it does, rather than trusting the flag silently. `dnf remove -y
-ec2-instance-connect` also runs *before* install-linux.sh, not after: on
-AL2023's stock `sshd_config` (which keeps its `Include
-.../sshd_config.d/*.conf` line and sets no `AuthorizedKeysCommand` of its
-own), install-linux.sh writes the directive into a **new** drop-in file
-rather than appending to `sshd_config` itself, and it picks that file's
-priority prefix by looking at whatever *already* claims
-`AuthorizedKeysCommand` — removing ec2-instance-connect first keeps that
-outcome the same known file (`60-opk-ssh.conf`, opkssh's own default),
-so "remove that one file" is always a complete rollback.
+That script's own answer is a `--no-home-policy` flag plus an assertion
+that `/etc/sudoers.d/opkssh` was not created — but `router-setup.sh` does
+not run that script at all (its OS detection does not recognize Amazon
+Linux 2023; see CHANGELOG.md's v1.11.0 entry), so this estate's own
+`setup_opkssh` simply never writes a sudoers file: there is no flag to get
+right and nothing to assert afterward. `pkg_remove ec2-instance-connect`
+still runs *before* the opkssh install, not after: some AL2023 AMIs ship
+that package pre-enabled with its own `AuthorizedKeysCommand`, which would
+otherwise either silently win over opkssh's or collide with the fixed
+`60-opk-ssh.conf` drop-in name `setup_opkssh` writes — removing it first
+keeps "remove that one file" a complete rollback.
 
 ### tailscaled's image tag moves
 

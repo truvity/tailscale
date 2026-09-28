@@ -17,11 +17,12 @@ import (
 
 func exampleConfig() TailscaleInstanceConfig {
 	return TailscaleInstanceConfig{
-		Environment:    "example",
-		Region:         "eu-west-1",
-		VPCCIDRs:       []string{"10.0.0.0/16", "10.1.0.0/16"},
-		Tailnet:        "acme",
-		SSMAuthKeyPath: "/tailscale/acme/auth-key",
+		Environment:        "example",
+		Region:             "eu-west-1",
+		VPCCIDRs:           []string{"10.0.0.0/16", "10.1.0.0/16"},
+		Tailnet:            "acme",
+		SSMAuthKeyPath:     "/tailscale/acme/auth-key",
+		RouterSetupVersion: "1.11.0",
 	}
 }
 
@@ -104,34 +105,57 @@ func writeFiles(t *testing.T, userData string) (map[string]string, []string) {
 
 // The default render is pinned byte-for-byte: any change to it is a new
 // launch template version, and the ASG's instance refresh replaces every
-// router. Change testdata/userdata-default.yaml only on purpose (the SSH
-// inputs left it untouched; the join log on the serial console did not).
+// router. Change testdata/userdata-default.yaml only on purpose.
 func TestUserDataDefaultUnchanged(t *testing.T) {
 	c := exampleConfig()
 	require.NoError(t, c.validateSSHUserCA())
 	assertGolden(t, "userdata-default.yaml", buildTailscaleUserData(c))
 }
 
-// The join is the one critical path; its log must reach the serial
-// console, the only diagnosis there is without a shell on the router.
-func TestUserDataJoinLogsToConsole(t *testing.T) {
-	files, _ := writeFiles(t, buildTailscaleUserData(exampleConfig()))
+// The bootstrap's own runcmd is the one critical path this file still
+// renders directly: a broken download or checksum must never run
+// router-setup.sh, and a broken router-setup.sh must never block the
+// tailnet join it itself arms. The join's own log reaching the serial
+// console is router-setup.sh's job — see router_setup_test.go.
+func TestUserDataBootstrapFailsClosed(t *testing.T) {
+	_, cmds := writeFiles(t, buildTailscaleUserData(exampleConfig()))
 
-	assert.Contains(t, files["/usr/local/sbin/tailscale-join.sh"], "exec > >(tee -a /var/log/tailscale-join.log) 2>&1")
-	assert.Contains(t, files["/etc/systemd/system/tailscale-join.service"], "StandardOutput=journal+console")
+	joined := strings.Join(cmds, "\n")
+	assert.Contains(t, joined, "sha256sum -c -", "the download is checksum-verified before use")
+	assert.Contains(t, joined, `echo "router-setup checksum fail"`)
+	assert.Contains(t, joined, `/usr/local/sbin/router-setup.sh || echo "router-setup fail"`,
+		"a failing router-setup.sh must not stop the join from being armed")
+	assert.Contains(t, cmds, "systemctl enable --now --no-block tailscale-join.service")
+}
+
+// The bootstrap pins router-setup.sh's own digest — computed from the
+// exact bytes embedded in this build, so it is always self-consistent —
+// and fetches it from a URL keyed by RouterSetupVersion.
+func TestUserDataBootstrapPinsRouterSetupScript(t *testing.T) {
+	c := exampleConfig()
+	files, cmds := writeFiles(t, buildTailscaleUserData(c))
+
+	assert.Contains(t, strings.Join(cmds, "\n"), RouterSetupSHA256())
+	assert.Contains(t, strings.Join(cmds, "\n"), RouterSetupURL(c.RouterSetupVersion))
+	assert.Contains(t, cmds, `curl -fsSL -o /usr/local/sbin/router-setup.sh "`+RouterSetupURL(c.RouterSetupVersion)+`"`)
+
+	env := files["/etc/tailscale-router/router.env"]
+	assert.Contains(t, env, `REGION="eu-west-1"`)
+	assert.Contains(t, env, `SSH_USER_CA="false"`)
+	assert.Contains(t, env, `OPKSSH="false"`)
 }
 
 func TestUserDataDefaultHasNoCertificateLogin(t *testing.T) {
 	files, cmds := writeFiles(t, buildTailscaleUserData(exampleConfig()))
 
-	assert.NotContains(t, files, "/etc/ssh/sshd_config.d/10-user-ca.conf")
-	assert.NotContains(t, files, "/etc/ssh/trusted-user-ca-keys.pub")
+	assert.NotContains(t, files, "/etc/tailscale-router/trusted-user-ca-keys.pub")
 
 	for path := range files {
 		assert.NotContains(t, path, "authorized_principals")
 	}
 
-	assert.NotContains(t, cmds, "firewall-cmd --permanent --zone=public --remove-service=ssh")
+	assert.Contains(t, files["/etc/tailscale-router/router.env"], `SSH_USER_CA="false"`)
+	assert.NotContains(t, strings.Join(cmds, "\n"), "remove-service=ssh")
 }
 
 func TestUserDataSSHUserCAGolden(t *testing.T) {
@@ -140,33 +164,20 @@ func TestUserDataSSHUserCAGolden(t *testing.T) {
 	assertGolden(t, "userdata-ssh-user-ca.yaml", buildTailscaleUserData(c))
 }
 
-func TestUserDataSSHUserCAFiles(t *testing.T) {
+// The bootstrap stages the raw CA material unchanged; router-setup.sh
+// (router_setup_test.go) is what turns it into sshd's final
+// configuration, so this only checks what the bootstrap itself renders.
+func TestUserDataSSHUserCAStagesFiles(t *testing.T) {
 	c := sshCAConfig(t)
-	files, cmds := writeFiles(t, buildTailscaleUserData(c))
+	files, _ := writeFiles(t, buildTailscaleUserData(c))
 
-	assert.Equal(t, c.TrustedUserCAKeys[0]+"\n"+c.TrustedUserCAKeys[1]+"\n", files["/etc/ssh/trusted-user-ca-keys.pub"],
+	assert.Equal(t, c.TrustedUserCAKeys[0]+"\n"+c.TrustedUserCAKeys[1]+"\n", files["/etc/tailscale-router/trusted-user-ca-keys.pub"],
 		"both keys, in the caller's order (current, then next during a rotation)")
-	assert.Equal(t, "ec2-user\n", files["/etc/ssh/authorized_principals/ec2-user"])
-	assert.Equal(t, "breakglass\noncall\n", files["/etc/ssh/authorized_principals/operator"], "principals sorted")
-	assert.NotContains(t, files, "/etc/ssh/authorized_principals/root")
+	assert.Equal(t, "ec2-user\n", files["/etc/tailscale-router/authorized_principals/ec2-user"])
+	assert.Equal(t, "breakglass\noncall\n", files["/etc/tailscale-router/authorized_principals/operator"], "principals sorted")
+	assert.NotContains(t, files, "/etc/tailscale-router/authorized_principals/root")
 
-	sshd := files["/etc/ssh/sshd_config.d/10-user-ca.conf"]
-	for _, line := range []string{
-		"TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pub",
-		"AuthorizedPrincipalsFile /etc/ssh/authorized_principals/%u",
-		"AuthorizedKeysFile none",
-		"PubkeyAuthentication yes",
-		"PasswordAuthentication no",
-		"LogLevel VERBOSE",
-	} {
-		assert.Contains(t, strings.Split(sshd, "\n"), line)
-	}
-
-	// The existing hardening drop-in is untouched and still refuses root.
-	assert.Contains(t, files["/etc/ssh/sshd_config.d/99-hardening.conf"], "PermitRootLogin no\n")
-
-	assert.Contains(t, cmds, "firewall-cmd --permanent --zone=public --remove-service=ssh")
-	assert.Contains(t, cmds, "sshd -t")
+	assert.Contains(t, files["/etc/tailscale-router/router.env"], `SSH_USER_CA="true"`)
 }
 
 // Map iteration and the caller's principal order never reach the
@@ -243,17 +254,29 @@ func TestValidateSSHUserCA(t *testing.T) {
 	}
 }
 
-// EC2 refuses user data over 16 KB (before base64). The SSH variant,
-// with two CA keys (a rotation) and two users, must fit with room left.
+// EC2 refuses user data over 16 KiB (before base64). Since the bootstrap
+// split (moving chrony/audit/journald/sshd hardening/the join
+// script/systemd units/the opkssh install steps into router-setup.sh,
+// a download this file only pins by URL and sha256), what is left in
+// user data is small even with every feature enabled together —
+// generous headroom, not the tight margin the pre-split design needed.
 func TestUserDataFitsEC2Limit(t *testing.T) {
 	const ec2UserDataLimit = 16 * 1024
+	const generousLimit = 8 * 1024
 
-	for name, c := range map[string]TailscaleInstanceConfig{
-		"default":     exampleConfig(),
-		"ssh-user-ca": sshCAConfig(t),
-		"opkssh":      opksshConfig(t),
+	c := sshCAConfig(t)
+	c.OPKSSH = opksshConfig(t).OPKSSH
+	require.NoError(t, c.validateSSHUserCA())
+	require.NoError(t, c.validateOPKSSH())
+
+	for name, cfg := range map[string]TailscaleInstanceConfig{
+		"default":              exampleConfig(),
+		"ssh-user-ca":          sshCAConfig(t),
+		"opkssh":               opksshConfig(t),
+		"ssh-user-ca + opkssh": c,
 	} {
-		size := len(buildTailscaleUserData(c))
-		assert.Less(t, size, ec2UserDataLimit-1024, "%s user data is %d bytes; keep 1 KiB of headroom under EC2's 16 KiB", name, size)
+		size := len(buildTailscaleUserData(cfg))
+		msg := "%s user data is %d bytes; want under %d (EC2's own hard limit is %d)"
+		assert.Less(t, size, generousLimit, msg, name, size, generousLimit, ec2UserDataLimit)
 	}
 }

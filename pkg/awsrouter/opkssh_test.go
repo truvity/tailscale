@@ -25,8 +25,6 @@ func opksshConfig(t *testing.T) TailscaleInstanceConfig {
 		ArtifactSHA256:      "9dd10c2b6ce99cde18e52c054877ca014134b291fd82afe71741c68db4f83d44",
 		SELinuxModuleURL:    "https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/opkssh.te",
 		SELinuxModuleSHA256: "f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb9546926c4",
-		InstallScriptURL:    "https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/scripts/install-linux.sh",
-		InstallScriptSHA256: "493cc42f55b2da31491c3947fd75dc2589d691d1a79fa284fc8e9fef3815ca54",
 		Providers: []OPKSSHProvider{
 			{Issuer: "https://access.example.com", ClientID: "opkssh", Expiration: "24h"},
 		},
@@ -39,12 +37,11 @@ func opksshConfig(t *testing.T) TailscaleInstanceConfig {
 }
 
 func TestUserDataDefaultHasNoOPKSSH(t *testing.T) {
-	files, cmds := writeFiles(t, buildTailscaleUserData(exampleConfig()))
+	files, _ := writeFiles(t, buildTailscaleUserData(exampleConfig()))
 
-	assert.NotContains(t, files, "/usr/local/sbin/opkssh-install.sh")
-	assert.NotContains(t, files, "/etc/opk/providers")
-	assert.NotContains(t, files, "/etc/opk/auth_id")
-	assert.NotContains(t, cmds, "/usr/local/sbin/opkssh-install.sh")
+	assert.NotContains(t, files, "/etc/tailscale-router/opkssh-providers")
+	assert.NotContains(t, files, "/etc/tailscale-router/opkssh-auth_id")
+	assert.Contains(t, files["/etc/tailscale-router/router.env"], `OPKSSH="false"`)
 
 	for path := range files {
 		assert.NotContains(t, path, "opkssh")
@@ -59,84 +56,42 @@ func TestUserDataOPKSSHGolden(t *testing.T) {
 
 func TestUserDataOPKSSHPackages(t *testing.T) {
 	rendered := buildTailscaleUserData(opksshConfig(t))
-	assert.Contains(t, rendered, "\n  - wget\n", "install-linux.sh requires wget")
-	assert.Contains(t, rendered, "\n  - checkpolicy\n", "checkmodule/semodule_package build the SELinux module")
+	assert.Contains(t, rendered, "\n  - checkpolicy\n", "router-setup.sh's opkssh install needs checkmodule/semodule_package")
+	// router-setup.sh downloads with curl, already present on AL2023 —
+	// install-linux.sh's own wget requirement no longer applies.
+	assert.NotContains(t, rendered, "wget")
 
-	// Off by default: neither package appears without OPKSSH.
+	// Off by default: the package doesn't appear without OPKSSH.
 	def := buildTailscaleUserData(exampleConfig())
-	assert.NotContains(t, def, "wget")
 	assert.NotContains(t, def, "checkpolicy")
 }
 
-func TestUserDataOPKSSHInstallScript(t *testing.T) {
+// The bootstrap stages the exact opkssh config values (as
+// /etc/tailscale-router/router.env and two small literal files);
+// router-setup.sh's setup_opkssh (router_setup_test.go) is what
+// actually installs opkssh and writes its final /etc/opk/* files and
+// sshd drop-in, replacing opkssh's own upstream install-linux.sh (which
+// does not recognize Amazon Linux 2023 — see CHANGELOG.md) with steps
+// this package owns.
+func TestUserDataOPKSSHStagesConfig(t *testing.T) {
 	c := opksshConfig(t)
-	files, cmds := writeFiles(t, buildTailscaleUserData(c))
+	files, _ := writeFiles(t, buildTailscaleUserData(c))
 
-	assert.Contains(t, cmds, "/usr/local/sbin/opkssh-install.sh", "runcmd invokes the script written by write_files")
-
-	script := files["/usr/local/sbin/opkssh-install.sh"]
-	require.NotEmpty(t, script)
-
-	// Fail-closed: the artifacts are verified against the exact
-	// configured sha256 before install-linux.sh ever runs, and a verify
-	// failure aborts (exit 0, not a hard failure that would leave the
-	// router mid-install).
+	env := files["/etc/tailscale-router/router.env"]
 	for _, want := range []string{
-		c.OPKSSH.ArtifactURL,
-		c.OPKSSH.ArtifactSHA256,
-		c.OPKSSH.SELinuxModuleURL,
-		c.OPKSSH.SELinuxModuleSHA256,
-		c.OPKSSH.InstallScriptURL,
-		c.OPKSSH.InstallScriptSHA256,
-		"sha256sum -c",
-		`c=/etc/ssh/sshd_config.d/60-opk-ssh.conf`,
-		`fail(){ echo "opkssh $1 fail"; rm -f "$c"; exit 0; }`,
-		`|| fail "checksum"`,
-		`|| fail "install"`,
+		`OPKSSH="true"`,
+		`OPKSSH_ARTIFACT_VERSION="0.16.0"`,
+		`OPKSSH_ARTIFACT_URL="` + c.OPKSSH.ArtifactURL + `"`,
+		`OPKSSH_ARTIFACT_SHA256="` + c.OPKSSH.ArtifactSHA256 + `"`,
+		`OPKSSH_SELINUX_URL="` + c.OPKSSH.SELinuxModuleURL + `"`,
+		`OPKSSH_SELINUX_SHA256="` + c.OPKSSH.SELinuxModuleSHA256 + `"`,
 	} {
-		assert.Contains(t, script, want)
+		assert.Contains(t, env, want)
 	}
 
-	// EC2 Instance Connect ships its own AuthorizedKeysCommand on some
-	// AL2023 AMIs, which would silently win over opkssh's AND change
-	// which sshd drop-in filename install-linux.sh picks — so it is
-	// removed BEFORE install-linux.sh ever runs, not after.
-	dnfIndex := strings.Index(script, "dnf remove -y ec2-instance-connect || true")
-	installIndex := strings.Index(script, `bash "$d/s"`)
-	require.GreaterOrEqual(t, dnfIndex, 0)
-	require.GreaterOrEqual(t, installIndex, 0)
-	assert.Less(t, dnfIndex, installIndex, "ec2-instance-connect must be removed before install-linux.sh runs")
+	assert.Equal(t, "https://access.example.com opkssh 24h\n", files["/etc/tailscale-router/opkssh-providers"])
+	assert.Equal(t, "ec2-user oidc:groups:ssh-admins https://access.example.com\n", files["/etc/tailscale-router/opkssh-auth_id"])
 
-	// --no-home-policy: the only policy surface is /etc/opk/auth_id.
-	// Without it, install-linux.sh lets a login user grant themselves
-	// extra identities via ~user/.opk/auth_id and installs a passwordless
-	// sudoers rule for opkssh to read it. The script also asserts that
-	// rule was not created, rather than trusting the flag silently.
-	assert.Contains(t, script, "--no-home-policy")
-	assert.Contains(t, script, `[ -e /etc/sudoers.d/opkssh ] && fail "sudoers"`)
-
-	// install-linux.sh runs with the verified local files and
-	// --no-sshd-restart, so nothing reloads sshd before our own sshd -t
-	// gate below.
-	assert.Contains(t, script, `--install-from="$d/b" --install-te-from="$d/t"`)
-	assert.Contains(t, script, `--install-version="0.16.0" --no-sshd-restart`)
-
-	// The providers/auth_id content and the ownership/mode opkssh's own
-	// docs require.
-	assert.Contains(t, script, "https://access.example.com opkssh 24h")
-	assert.Contains(t, script, "ec2-user oidc:groups:ssh-admins https://access.example.com")
-	assert.Contains(t, script, "chown root:opksshuser /etc/opk/providers /etc/opk/auth_id")
-	assert.Contains(t, script, "chmod 640 /etc/opk/providers /etc/opk/auth_id")
-
-	// The lock-out-safe guard: sshd -t before any reload, and a
-	// rollback (removing only the opkssh drop-in) on failure — the
-	// certificate path's own files are never named here.
-	sshdTIndex := strings.Index(script, "sshd -t && {")
-	require.GreaterOrEqual(t, sshdTIndex, 0, "sshd -t must gate the reload")
-	assert.Contains(t, script, "systemctl reload sshd")
-	assert.Contains(t, script, `rm -f "$c"`)
-	assert.NotContains(t, script, "trusted-user-ca-keys")
-	assert.NotContains(t, script, "10-user-ca.conf")
 	for path := range files {
 		assert.NotContains(t, path, "trusted-user-ca-keys")
 	}
@@ -144,55 +99,29 @@ func TestUserDataOPKSSHInstallScript(t *testing.T) {
 
 // opkssh is independent of the certificate path: both can be set, and
 // each renders exactly as it does alone.
+// opkssh is independent of the certificate path: both stage cleanly
+// together, and router-setup.sh runs both setup_ssh_user_ca and
+// setup_opkssh independently of each other (router_setup_test.go).
 func TestUserDataOPKSSHWithSSHUserCA(t *testing.T) {
 	c := sshCAConfig(t)
 	c.OPKSSH = opksshConfig(t).OPKSSH
 	require.NoError(t, c.validateSSHUserCA())
 	require.NoError(t, c.validateOPKSSH())
 
-	files, cmds := writeFiles(t, buildTailscaleUserData(c))
+	files, _ := writeFiles(t, buildTailscaleUserData(c))
 
-	assert.Contains(t, files, "/etc/ssh/sshd_config.d/10-user-ca.conf")
-	assert.Contains(t, files, "/usr/local/sbin/opkssh-install.sh")
-	assert.Contains(t, cmds, "sshd -t")
-	assert.Contains(t, cmds, "/usr/local/sbin/opkssh-install.sh")
+	assert.Contains(t, files, "/etc/tailscale-router/trusted-user-ca-keys.pub")
+	assert.Contains(t, files, "/etc/tailscale-router/opkssh-providers")
+	env := files["/etc/tailscale-router/router.env"]
+	assert.Contains(t, env, `SSH_USER_CA="true"`)
+	assert.Contains(t, env, `OPKSSH="true"`)
 }
 
-// opkssh alone fits userdata_test.go's shared 1 KiB headroom (see
-// TestUserDataFitsEC2Limit). Stacked on an existing certificate login —
-// the realistic shape for the pilot router, which already has one — the
-// margin is much tighter: opkssh's own pinned artifacts (three URLs and
-// three sha256 digests it must carry to fail closed) leave little room.
-// This test enforces the true EC2 limit for that combination, with a
-// smaller, explicit margin — not the 1 KiB convention the other cases
-// use.
-//
-// **Operational consequence, not just a test detail**: enabling opkssh
-// alongside a certificate-login rotation (two CA keys, more than one
-// principal user) can exceed the hard limit outright, which Pulumi/AWS
-// would refuse at apply time. Keep `Providers`/`AuthorizedIdentities`
-// minimal, and do not roll an opkssh change during an active CA
-// rotation without re-running this test against the real inputs.
-func TestUserDataOPKSSHWithCertificateLoginFitsEC2Limit(t *testing.T) {
-	const ec2UserDataLimit = 16 * 1024
-	const margin = 200 // smaller than the 1 KiB convention — see comment above
-
-	// The realistic pilot shape: opkssh added to a router that already
-	// has certificate login for exactly one user, one CA key (no
-	// rotation in progress).
-	c := exampleConfig()
-	c.TrustedUserCAKeys = []string{caKey(t, 1, "example-ca-current")}
-	c.AuthorizedPrincipals = map[string][]string{"ec2-user": {"ec2-user"}}
-	c.OPKSSH = opksshConfig(t).OPKSSH
-
-	require.NoError(t, c.validateSSHUserCA())
-	require.NoError(t, c.validateOPKSSH())
-
-	size := len(buildTailscaleUserData(c))
-	assert.Less(t, size, ec2UserDataLimit-margin,
-		"opkssh + one-key certificate login user data is %d bytes; keep at least %d bytes under EC2's 16 KiB limit", size, margin)
-}
-
+// Stacking opkssh on a certificate-login rotation no longer meaningfully
+// threatens the EC2 limit post-bootstrap-split (see TestUserDataFitsEC2Limit's
+// "ssh-user-ca + opkssh" case, checked against an 8 KiB generous limit,
+// not the pre-split 200-byte margin this used to need) — the size test
+// in userdata_test.go now covers this combination directly.
 func TestValidateOPKSSH(t *testing.T) {
 	valid := func() *OPKSSHConfig {
 		return &OPKSSHConfig{
@@ -202,8 +131,6 @@ func TestValidateOPKSSH(t *testing.T) {
 			ArtifactSHA256:      strings.Repeat("a", 64),
 			SELinuxModuleURL:    "https://example.com/opkssh.te",
 			SELinuxModuleSHA256: strings.Repeat("b", 64),
-			InstallScriptURL:    "https://example.com/install-linux.sh",
-			InstallScriptSHA256: strings.Repeat("c", 64),
 			Providers: []OPKSSHProvider{
 				{Issuer: "https://access.example.com", ClientID: "opkssh", Expiration: "24h"},
 			},
@@ -238,9 +165,9 @@ func TestValidateOPKSSH(t *testing.T) {
 		"http artifact url": {mutate: func(o *OPKSSHConfig) {
 			o.ArtifactURL = "http://example.com/opkssh-linux-arm64"
 		}, wantErr: "ArtifactURL"},
-		"empty install script url": {mutate: func(o *OPKSSHConfig) {
-			o.InstallScriptURL = ""
-		}, wantErr: "InstallScriptURL"},
+		"empty selinux module url": {mutate: func(o *OPKSSHConfig) {
+			o.SELinuxModuleURL = ""
+		}, wantErr: "SELinuxModuleURL"},
 		"no providers": {mutate: func(o *OPKSSHConfig) {
 			o.Providers = nil
 		}, wantErr: "Providers is empty"},

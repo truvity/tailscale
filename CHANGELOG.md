@@ -5,6 +5,63 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. Both charts and the Go module are released
 together at every version.
 
+## v1.11.0
+
+- **Fix: opkssh now installs on Amazon Linux 2023.** v1.10.0's `OPKSSH`
+  input ran opkssh's own upstream `scripts/install-linux.sh`, whose
+  `determine_linux_type()` recognizes only `/etc/redhat-release`,
+  `/etc/debian_version`, `/etc/arch-release`, or an `/etc/os-release`
+  with `ID_LIKE=*suse`. AL2023 has none of these (`ID=amzn`,
+  `ID_LIKE=fedora`, no `/etc/redhat-release`) — checked against every
+  opkssh release through its own `main` branch as of this fix, none
+  recognize AL2023 — so the install always failed "Unsupported OS
+  type", silently (the error was swallowed into a shell variable), and
+  the router's own fail-closed design then removed the opkssh drop-in
+  and left the router without opkssh, correctly but without opkssh.
+  `pkg/awsrouter` now OWNS the install steps for AL2023 instead of
+  depending on that script: creating the `opksshuser` account,
+  installing the checksum-verified binary, compiling and loading the
+  SELinux module when enforcing, and writing the sshd
+  `AuthorizedKeysCommand` drop-in — the same steps that script performs
+  for a redhat-family host, which AL2023 is. `OPKSSHConfig` drops
+  `InstallScriptURL`/`InstallScriptSHA256` (no longer downloaded); every
+  other field is unchanged. There is now no `--no-home-policy` flag to
+  get right or assert after the fact — the owned steps never write
+  `/etc/sudoers.d/opkssh` at all.
+
+- **Bootstrap split: user data is now a small download, not the whole
+  router.** Everything the single cloud-init template used to render
+  directly — chrony, audit rules, persistent journald, sshd hardening,
+  the tailnet repo and join unit, and the certificate-login and opkssh
+  blocks above — now lives in `router-setup.sh`: one generic,
+  version-pinned script every router downloads and checksum-verifies
+  (fail closed on either a download failure or a mismatch) before
+  running. It is published as this release's `router-setup-v1.11.0.sh`
+  GitHub Release asset and embedded in the Go module
+  (`pkg/awsrouter/bootstrap.go`), so the sha256 a consumer's own build
+  computes from the embedded copy is always the sha256 of the asset a
+  router downloads — the same git blob, at the same tag. A new required
+  field, `TailscaleInstanceConfig.RouterSetupVersion` ("X.Y.Z", no
+  leading "v" — normally the version the caller's own `go.mod` pins),
+  builds that download URL.
+
+  This exists because EC2 caps user data at 16 KiB and a real router,
+  with certificate login and opkssh both configured, was rendering
+  16,120 of those 16,384 bytes — 264 bytes of headroom from a hard
+  failure at the next added byte. The same router's user data is now a
+  few KiB with every feature enabled (`pkg/awsrouter/userdata_test.go`'s
+  `TestUserDataFitsEC2Limit` now checks an 8 KiB generous limit, not the
+  pre-split 200-byte margin `TestUserDataOPKSSHWithCertificateLoginFitsEC2Limit`
+  used to need).
+
+  Behavior for a router with neither optional feature is unchanged —
+  `pkg/awsrouter/router_setup_test.go` runs `router-setup.sh` for real,
+  with real bash, against a throwaway root and proves the effective
+  configuration (every file sshd and systemd actually read, and their
+  content/mode) matches what the pre-split template rendered directly.
+  Router egress to github.com, already needed for opkssh's own
+  artifacts, now also carries this download — see docs/safety.md.
+
 ## v1.10.1
 
 - **Guard: every invoke in `pkg/awsrouter` now proves it carries an
