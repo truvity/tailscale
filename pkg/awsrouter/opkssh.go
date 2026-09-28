@@ -16,29 +16,28 @@ import (
 // (`10-user-ca.conf`, `trusted-user-ca-keys.pub`,
 // `authorized_principals/*`) are never touched by this file.
 //
-// With OPKSSH set, cloud-init:
+// With OPKSSH set, router-setup.sh's setup_opkssh (see that file):
 //
 //   - removes ec2-instance-connect first (some AL2023 AMIs ship it
 //     pre-enabled with its own AuthorizedKeysCommand, which would
-//     silently win over opkssh's, and would also change which sshd
-//     drop-in filename install-linux.sh picks next);
-//   - downloads the pinned opkssh binary, its scripts/install-linux.sh
-//     and its SELinux type-enforcement module, verifying each against
-//     its sha256 before using it — a mismatch aborts the install, fail
-//     closed, rather than running an unverified binary as root;
-//   - runs install-linux.sh (which creates the opksshuser system
-//     account, installs the SELinux module AL2023's enforcing policy
-//     needs, and wires sshd's AuthorizedKeysCommand) with
-//     --no-home-policy and --no-sshd-restart. --no-home-policy matters:
-//     without it, install-linux.sh lets a login user grant their own
-//     account extra identities via ~user/.opk/auth_id and installs a
-//     passwordless sudoers rule so opkssh can read it — a second policy
-//     surface a shell user could self-serve from, bypassing the single
-//     roster-rendered /etc/opk/auth_id this router is meant to enforce.
-//     The install script also asserts /etc/sudoers.d/opkssh does not
-//     exist afterward and aborts if it does, rather than trusting the
-//     flag silently. --no-sshd-restart means nothing reloads sshd until
-//     our own `sshd -t` gate passes;
+//     silently win over opkssh's, and would also collide with the sshd
+//     drop-in name below);
+//   - downloads the pinned opkssh binary and its SELinux
+//     type-enforcement module, verifying each against its sha256 before
+//     using it — a mismatch aborts the install, fail closed, rather
+//     than running an unverified binary as root;
+//   - creates the opksshuser system account, installs the binary and
+//     (when SELinux is enforcing) the SELinux module, and writes the
+//     sshd AuthorizedKeysCommand drop-in — OWN steps, not opkssh's
+//     upstream scripts/install-linux.sh: that script's
+//     determine_linux_type() does not recognize Amazon Linux 2023 (no
+//     /etc/redhat-release, ID_LIKE=fedora not *suse) on any release
+//     through its own main branch as of this fix, so it always fails
+//     "Unsupported OS type" here — see CHANGELOG.md. There is no
+//     --no-home-policy flag to get right or assert after the fact:
+//     this script never writes /etc/sudoers.d/opkssh at all, so the
+//     only policy surface is the single roster-rendered
+//     /etc/opk/auth_id;
 //   - writes /etc/opk/providers and /etc/opk/auth_id with the ownership
 //     (root:opksshuser) and mode (0640) opkssh's own docs require;
 //   - runs `sshd -t` before ever reloading sshd; on failure (or on any
@@ -57,8 +56,8 @@ type (
 		Enabled bool
 
 		// ArtifactVersion is the opkssh release these artifacts come
-		// from, e.g. "0.16.0" — passed to install-linux.sh's own
-		// --install-version flag and recorded in the install log.
+		// from, e.g. "0.16.0" — recorded in /var/log/opkssh.log by
+		// router-setup.sh's own install log line.
 		ArtifactVersion string
 		// ArtifactURL/ArtifactSHA256 are the opkssh binary for this
 		// fleet's AMI architecture. This package is AL2023 ARM64 only
@@ -71,10 +70,6 @@ type (
 		// binary nor in the rpm.
 		SELinuxModuleURL    string
 		SELinuxModuleSHA256 string
-		// InstallScriptURL/SHA256 are scripts/install-linux.sh at the
-		// same tag.
-		InstallScriptURL    string
-		InstallScriptSHA256 string
 
 		// Providers are the OpenID Providers /etc/opk/providers admits,
 		// rendered one per line in this order.
@@ -142,7 +137,6 @@ func (c TailscaleInstanceConfig) validateOPKSSH() error {
 	for _, sum := range []struct{ name, value string }{
 		{"ArtifactSHA256", o.ArtifactSHA256},
 		{"SELinuxModuleSHA256", o.SELinuxModuleSHA256},
-		{"InstallScriptSHA256", o.InstallScriptSHA256},
 	} {
 		if !sha256HexPattern.MatchString(sum.value) {
 			return fmt.Errorf("awsrouter: OPKSSH.%s is not a 64-character lowercase-hex sha256 digest", sum.name)
@@ -152,7 +146,6 @@ func (c TailscaleInstanceConfig) validateOPKSSH() error {
 	for _, u := range []struct{ name, value string }{
 		{"ArtifactURL", o.ArtifactURL},
 		{"SELinuxModuleURL", o.SELinuxModuleURL},
-		{"InstallScriptURL", o.InstallScriptURL},
 	} {
 		if err := validateOPKSSHHTTPSURL(u.value); err != nil {
 			return fmt.Errorf("awsrouter: OPKSSH.%s: %w", u.name, err)

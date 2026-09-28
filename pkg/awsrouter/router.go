@@ -116,6 +116,17 @@ type (
 		// default): the user data renders exactly as it did before this
 		// input existed.
 		OPKSSH *OPKSSHConfig
+
+		// RouterSetupVersion is the truvity/tailscale release this
+		// router's bootstrap downloads router-setup.sh from — normally
+		// the exact version the caller's own go.mod pins (bootstrap.go).
+		// Required: "X.Y.Z", no leading "v". The bootstrap fetches
+		// https://github.com/truvity/tailscale/releases/download/vX.Y.Z/router-setup-vX.Y.Z.sh
+		// and refuses to run it unless it matches
+		// RouterSetupSHA256() — the sha256 of the copy embedded in
+		// THIS build, which is byte-for-byte what that release
+		// published (see bootstrap.go and docs/safety.md).
+		RouterSetupVersion string
 	}
 
 	// TailscaleInstanceResult holds references to all created Tailscale instance resources.
@@ -126,7 +137,10 @@ type (
 		ASGID             pulumi.IDOutput
 	}
 
-	// userDataParams holds template parameters for the Tailscale instance user-data script.
+	// userDataParams holds template parameters for the Tailscale instance
+	// bootstrap user-data (tailscale_userdata.yaml.gotmpl). The bulk of
+	// what this used to render directly now lives in the version-pinned,
+	// checksum-verified router-setup.sh it downloads — see bootstrap.go.
 	userDataParams struct {
 		Region            string           // AWS region for SSM and EC2 API calls
 		AdvertiseRoutes   string           // Comma-separated VPC CIDRs for --advertise-routes
@@ -137,6 +151,8 @@ type (
 		LifecycleHookName string           // Lifecycle hook name for readiness signal
 		SSHUserCA         *sshUserCAParams // nil: no certificate login (default)
 		OPKSSH            *OPKSSHConfig    // nil: no opkssh sign-in (default)
+		SetupScriptURL    string           // where the bootstrap downloads router-setup.sh from
+		SetupScriptSHA256 string           // pinned digest; a mismatch is refused, fail closed
 	}
 )
 
@@ -173,6 +189,10 @@ func CreateTailscaleInstance(
 	}
 
 	if err := config.validateOPKSSH(); err != nil {
+		return nil, err
+	}
+
+	if err := config.validateRouterSetupVersion(); err != nil {
 		return nil, err
 	}
 
@@ -536,6 +556,8 @@ func buildTailscaleUserData(config TailscaleInstanceConfig) string {
 		LifecycleHookName: config.baseName() + "-launch",
 		SSHUserCA:         config.sshUserCAParams(),
 		OPKSSH:            config.opksshParams(),
+		SetupScriptURL:    RouterSetupURL(config.RouterSetupVersion),
+		SetupScriptSHA256: RouterSetupSHA256(),
 	}); err != nil {
 		// Template is embedded and tested — panic is appropriate for a compile-time error.
 		panic(fmt.Sprintf("render tailscale user-data template: %v", err))

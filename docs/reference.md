@@ -198,6 +198,10 @@ func routerFleet(
 		WarmPool:       true,
 		Tailnet:        "example",
 		SSMAuthKeyPath: keyPath,
+		// The truvity/tailscale release this router's bootstrap
+		// downloads router-setup.sh from — normally the version this
+		// go.mod pins.
+		RouterSetupVersion: "1.11.0",
 
 		// Optional: OpenSSH user-certificate login, over the tailnet only.
 		TrustedUserCAKeys: []string{
@@ -216,8 +220,6 @@ func routerFleet(
 			ArtifactSHA256:      "...", // the release's sha256 for that binary
 			SELinuxModuleURL:    "https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/opkssh.te",
 			SELinuxModuleSHA256: "...",
-			InstallScriptURL:    "https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/scripts/install-linux.sh",
-			InstallScriptSHA256: "...",
 			Providers: []awsrouter.OPKSSHProvider{
 				{Issuer: "https://access.example.com", ClientID: "opkssh", Expiration: "24h"},
 			},
@@ -254,6 +256,7 @@ func routerFleet(
 | `TrustedUserCAKeys` | empty (off) | OpenSSH user-CA public keys, one `authorized_keys`-format line each, written to `/etc/ssh/trusted-user-ca-keys.pub`. Requires `AuthorizedPrincipals` |
 | `AuthorizedPrincipals` | empty (off) | login user → the certificate principals that may log in as it, written to `/etc/ssh/authorized_principals/<user>`. Requires `TrustedUserCAKeys` |
 | `OPKSSH` | `nil` (off) | optional OIDC sign-in via [opkssh](https://github.com/openpubkey/opkssh), additive to `TrustedUserCAKeys`/`AuthorizedPrincipals` — see `OPKSSHConfig` below |
+| `RouterSetupVersion` | *required* | `"X.Y.Z"` (no leading `v`) — the truvity/tailscale release the bootstrap downloads `router-setup.sh` from; normally the version this `go.mod` pins |
 
 ### `OPKSSHConfig`
 
@@ -265,10 +268,9 @@ ahead of flipping the one field that turns it on.
 | Field | Notes |
 |---|---|
 | `Enabled` | off by default |
-| `ArtifactVersion` | the opkssh release, e.g. `"0.16.0"` — passed to `install-linux.sh --install-version` |
+| `ArtifactVersion` | the opkssh release, e.g. `"0.16.0"` — recorded in `/var/log/opkssh.log`'s install line |
 | `ArtifactURL`, `ArtifactSHA256` | the opkssh binary for this fleet's AMI architecture (AL2023 ARM64 — this package is ARM64-only, see "The image lookup" below); a sha256 mismatch aborts the install |
 | `SELinuxModuleURL`, `SELinuxModuleSHA256` | `opkssh.te` at the same tag — AL2023 runs SELinux enforcing and this module ships in neither the binary nor the rpm |
-| `InstallScriptURL`, `InstallScriptSHA256` | `scripts/install-linux.sh` at the same tag |
 | `Providers` | `[]OPKSSHProvider{Issuer, ClientID, Expiration}` — one `/etc/opk/providers` line each, in order. `Issuer` must be an absolute `https://` URL; `ClientID` and `Expiration` must be plain tokens (no whitespace or shell metacharacters); `Expiration` must be one of opkssh's own policies (`12h`, `24h`, `48h`, `1week`, `oidc`, `oidc-refreshed`) |
 | `AuthorizedIdentities` | `[]OPKSSHAuthID{User, Group, Issuer}` — one `/etc/opk/auth_id` line each, in order, admitting `User` to sign in as `oidc:groups:Group` when `Issuer` signed the ID token. `User` must be a plain login name and not `root`; `Group` must be a plain token (no whitespace or shell metacharacters — refused outright, never escaped); `Issuer` must be one of `Providers`' issuers |
 
@@ -297,68 +299,83 @@ between updates patch themselves (below). See
 [safety.md](safety.md#the-image-follows-the-newest-match) for what the name
 pattern also matches.
 
-### The user data
+### The user data: a small bootstrap, plus a downloaded script
 
-cloud-init, pinned by `pkg/awsrouter/testdata/userdata-default.yaml`:
+The cloud-init user data (`pkg/awsrouter/testdata/userdata-default.yaml`) is
+deliberately small. It:
 
-- installs chrony (pinned to the Amazon Time Sync Service), audit (with watch
-  rules on the identity and login files), dnf-automatic (applying updates),
-  firewalld and a few diagnostic tools; a 1 GiB swap file; persistent
-  journald;
-- a nightly job applies updates and reboots when `needs-restarting -r` says so,
-  after a random delay of up to two hours so a fleet does not reboot at once;
+- installs the packages `router-setup.sh` needs (chrony, audit,
+  dnf-automatic, dnf-utils, firewalld, a few diagnostic tools, and
+  `checkpolicy` when `OPKSSH` is set) and sets up the 1 GiB swap file dnf
+  needs headroom for;
+- writes this router's own small values and feature flags to
+  `/etc/tailscale-router/router.env`, plus — only when set —
+  `TrustedUserCAKeys`/`AuthorizedPrincipals` or `OPKSSH`'s
+  providers/auth_id lines, as small literal files alongside it;
+- downloads `router-setup.sh` from a URL keyed by `RouterSetupVersion`,
+  checks it against a pinned sha256, and runs it — fail closed: a
+  download failure or a checksum mismatch is logged and skipped, never a
+  half-verified script run as root (and never blocks the tailnet join,
+  armed independently right after).
+
+**`router-setup.sh`** (`pkg/awsrouter/router-setup.sh`) does everything the
+single template used to render directly, reading `router.env` and the small
+staged files instead of Go template variables — it is the SAME file for
+every router of a given truvity/tailscale release, with or without the
+optional features:
+
+- chrony (pinned to the Amazon Time Sync Service), audit (with watch rules on
+  the identity and login files), persistent journald, and
+  `/etc/ssh/sshd_config.d/99-hardening.conf` (`PermitRootLogin no`, always);
+- a nightly job that applies updates and reboots when `needs-restarting -r`
+  says so, after a random delay of up to two hours so a fleet does not
+  reboot at once;
 - firewalld: the primary interface in `public` with the WireGuard port and
   masquerading, `tailscale0` in `trusted`;
-- `tailscale-join.sh`, run by a systemd unit and a cloud-final drop-in on every
-  boot: installs Tailscale from its signed repository, reads the key from
-  `SSMAuthKeyPath`, runs `tailscale up --advertise-routes=… --accept-dns=false`,
-  turns off the source/destination check and completes the lifecycle action —
-  retrying 20 times, 15 seconds apart. Its output goes to
-  `/var/log/tailscale-join.log` and to the serial console.
+- `tailscale-join.sh`, run by a systemd unit and a cloud-final drop-in on
+  every boot: installs Tailscale from its signed repository, reads the key
+  from `SSMAuthKeyPath`, runs
+  `tailscale up --advertise-routes=… --accept-dns=false`, turns off the
+  source/destination check and completes the lifecycle action — retrying 20
+  times, 15 seconds apart. Its output goes to `/var/log/tailscale-join.log`
+  and to the serial console;
+- when `SSH_USER_CA=true`: the CA keys, one principals file per user and
+  `/etc/ssh/sshd_config.d/10-user-ca.conf` (`PubkeyAuthentication yes`,
+  `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+  `AuthorizedKeysFile none`, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile`,
+  `LogLevel VERBOSE`), then removes `ssh` from the `public` zone so SSH
+  arrives over `tailscale0` only, and runs `sshd -t`;
+- when `OPKSSH=true`: opkssh, installed by OWN steps rather than opkssh's
+  upstream `scripts/install-linux.sh` — that script's OS detection does not
+  recognize Amazon Linux 2023 on any release through its own `main` branch,
+  so it always fails there (see CHANGELOG.md's v1.11.0 entry). First it
+  removes `ec2-instance-connect` (some AL2023 AMIs ship it pre-enabled with
+  its own `AuthorizedKeysCommand`, which would otherwise silently win over
+  opkssh's), then downloads the pinned opkssh binary and `opkssh.te`,
+  verifying each against its configured sha256 before using it — a mismatch
+  aborts, fail closed, and never touches sshd. It creates the `opksshuser`
+  system account, installs the binary, compiles and loads the SELinux module
+  when SELinux is enforcing, writes `/etc/opk/providers` and
+  `/etc/opk/auth_id` (`root:opksshuser`, mode `0640`), and writes the
+  `AuthorizedKeysCommand` sshd drop-in — but never a sudoers file; there is
+  no `--no-home-policy` flag to get right, because these steps never create
+  one. Only then does it run `sshd -t`: on success it reloads sshd, on
+  failure — or any earlier fail-closed abort — it removes only the opkssh
+  drop-in and leaves the previously running sshd, and the certificate-login
+  files above (never touched by this step), exactly as they were.
+  `AuthorizedKeysCommand` and `TrustedUserCAKeys` are independent sshd
+  mechanisms, so opkssh is additive regardless of whether certificate login
+  is also set.
 
-With the SSH inputs set it also writes the CA keys, one principals file per
-user and `/etc/ssh/sshd_config.d/10-user-ca.conf` (`PubkeyAuthentication yes`,
-`PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
-`AuthorizedKeysFile none`, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile`,
-`LogLevel VERBOSE`), removes `ssh` from the `public` zone so SSH arrives over
-`tailscale0` only, and runs `sshd -t`. `PermitRootLogin no` is set in every
-case. With neither input, the SSH inputs add nothing: the default user data
-is byte-for-byte what it was before they existed.
+With neither `TrustedUserCAKeys`/`AuthorizedPrincipals` nor `OPKSSH` set, the
+router's effective configuration — every file sshd and systemd actually
+read, and their content and mode — is unchanged from before this split;
+`pkg/awsrouter/router_setup_test.go` runs `router-setup.sh` for real (real
+bash, a throwaway root, no golden-string matching) and checks exactly this.
 
-With `OPKSSH` set, `/usr/local/sbin/opkssh-install.sh` (written by cloud-init,
-run once from `runcmd`, after the certificate-login block) first removes
-`ec2-instance-connect` (some AL2023 AMIs ship it pre-enabled with its own
-`AuthorizedKeysCommand`, which would otherwise silently win over opkssh's —
-removing it first, rather than after, also keeps install-linux.sh's own
-drop-in filename choice deterministic, see safety.md), then downloads the
-pinned opkssh binary, `opkssh.te` and `install-linux.sh`, verifying each
-against its configured sha256 before using it — a mismatch aborts the
-install, fail closed, and never touches sshd. It then runs `install-linux.sh
---install-from=... --install-te-from=... --no-home-policy --install-version=...
---no-sshd-restart` (creating the `opksshuser` system account, loading the
-SELinux module AL2023's enforcing policy needs, and wiring
-`AuthorizedKeysCommand` — but not reloading sshd). `--no-home-policy` keeps
-the only policy surface `/etc/opk/auth_id`: without it, install-linux.sh lets
-a login user grant themselves extra identities via `~user/.opk/auth_id` and
-installs a passwordless `sudoers.d` rule so opkssh can read it. The script
-asserts `/etc/sudoers.d/opkssh` was not created rather than trusting the flag
-silently, and aborts (rolling back its own drop-in) if it was. It then writes
-`/etc/opk/providers` and `/etc/opk/auth_id` (`root:opksshuser`, mode `0640`),
-and only then runs `sshd -t`: on success it reloads sshd, on failure — or any
-earlier fail-closed abort — it removes only the opkssh drop-in and leaves the
-previously running sshd — and the certificate-login files above, never
-touched by this script — exactly as they were. `AuthorizedKeysCommand` and
-`TrustedUserCAKeys` are independent sshd mechanisms, so opkssh is additive
-regardless of whether certificate login is also set. With `OPKSSH` unset (or
-`Enabled: false`), none of this runs: the user data is byte-for-byte what it
-was before this input existed.
-
-EC2 refuses user data over 16 KiB; a test keeps the SSH variant, with two CA
-keys and two users, 1 KiB under it, and opkssh alone the same. Stacked on an
-existing one-key certificate login — the realistic shape for a router that
-already has one — opkssh's own pinned artifacts leave much less room; a
-separate test keeps that combination under the hard limit with a smaller
-margin (see `pkg/awsrouter/opkssh_test.go` and
-[safety.md](safety.md#pkgawsrouter-opksshs-tight-margin-against-the-16-kib-limit)).
-Keep `Providers`/`AuthorizedIdentities` minimal, and do not roll an opkssh
-change during an active CA rotation without re-checking the render's size.
+EC2 refuses user data over 16 KiB. Before this split, a real router with
+both certificate login and opkssh configured rendered 16,120 of those 16,384
+bytes; `pkg/awsrouter/userdata_test.go`'s `TestUserDataFitsEC2Limit` now
+checks every combination of features against an 8 KiB generous limit, since
+almost everything that used to count against the 16 KiB limit is now inside
+the downloaded, version-pinned `router-setup.sh` instead.
