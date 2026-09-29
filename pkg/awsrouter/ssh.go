@@ -18,19 +18,25 @@ import (
 //   - /etc/ssh/trusted-user-ca-keys.pub — the CA public keys, one per line;
 //   - /etc/ssh/authorized_principals/<user> — the principals each user
 //     admits, one per line;
-//   - /etc/ssh/sshd_config.d/10-user-ca.conf — TrustedUserCAKeys,
-//     AuthorizedPrincipalsFile, AuthorizedKeysFile none (no static keys),
-//     PubkeyAuthentication yes, PasswordAuthentication no and
-//     LogLevel VERBOSE (sshd logs each certificate's key id and serial).
+//   - /etc/ssh/sshd_config.d/10-user-ca.conf — TrustedUserCAKeys and
+//     AuthorizedPrincipalsFile, and nothing else.
 //
-// and takes sshd off the primary interface's firewalld zone: the
+// The lockdown every SSH router gets — certificate login, opkssh, or
+// both — is not this file's: router-setup.sh writes
+// /etc/ssh/sshd_config.d/10-ssh-login.conf (AuthorizedKeysFile none, so
+// no static keys; PubkeyAuthentication yes; PasswordAuthentication and
+// KbdInteractiveAuthentication no; LogLevel VERBOSE, so sshd logs each
+// certificate's key id and serial) and takes sshd off the primary
+// interface's firewalld zone whenever EITHER login path is set: the
 // security group opens no TCP port, so SSH arrives over the tailnet
-// interface (the trusted zone) or not at all.
+// interface (the trusted zone) or not at all. Emptying both inputs here
+// removes the CA trust and the principals files and leaves an opkssh
+// router exactly as locked down as before.
 //
 // sshd keeps the FIRST value it reads for a keyword and reads the
-// sshd_config.d drop-ins in lexical order, so the drop-in sorts before
-// the distribution's and cloud-init's own (50-*): what it says is what
-// sshd does.
+// sshd_config.d drop-ins in lexical order, so both 10- drop-ins sort
+// before the distribution's and cloud-init's own (50-*): what they say
+// is what sshd does. They name no keyword in common.
 
 var (
 	// loginUserPattern is a conservative POSIX login name: it becomes a

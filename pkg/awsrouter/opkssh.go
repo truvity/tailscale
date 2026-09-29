@@ -14,7 +14,11 @@ import (
 // configured one in turn for pubkey auth — so enabling opkssh never
 // disables or reorders certificate login; ssh.go's files
 // (`10-user-ca.conf`, `trusted-user-ca-keys.pub`,
-// `authorized_principals/*`) are never touched by this file.
+// `authorized_principals/*`) are never touched by this file. Neither
+// path needs the other: opkssh alone gets the same SSH lockdown
+// (`10-ssh-login.conf`, sshd off the public firewalld zone) certificate
+// login gets, so a router can drop its certificate trust and keep
+// opkssh without loosening anything.
 //
 // With OPKSSH set, router-setup.sh's setup_opkssh (see that file):
 //

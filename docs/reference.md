@@ -178,8 +178,8 @@ func routerFleet(
 			"ec2-user": {"example-operator"},
 		},
 
-		// Optional: OIDC sign-in via opkssh, additive to the certificate
-		// login above.
+		// Optional: OIDC sign-in via opkssh, with or without the
+		// certificate login above.
 		OPKSSH: &awsrouter.OPKSSHConfig{
 			Enabled:             true,
 			ArtifactVersion:     "0.16.0",
@@ -238,9 +238,9 @@ func routerFleet(
 | `Max` | `Desired + 1` | used when it is at least `Desired` |
 | `WarmPool` | `false` | a warm pool of stopped, already-joined instances, `Desired` of them, capped at `Max` |
 | `PermissionsBoundaryName` | `""` (none) | the name of an IAM policy in the fleet's own account, attached as the role's permissions boundary |
-| `TrustedUserCAKeys` | empty (off) | OpenSSH user-CA public keys, one `authorized_keys`-format line each, written to `/etc/ssh/trusted-user-ca-keys.pub`. Requires `AuthorizedPrincipals` |
+| `TrustedUserCAKeys` | empty (off) | OpenSSH user-CA public keys, one `authorized_keys`-format line each, written to `/etc/ssh/trusted-user-ca-keys.pub`. Requires `AuthorizedPrincipals`. Empty with `OPKSSH` set: no CA trusted, the same SSH lockdown |
 | `AuthorizedPrincipals` | empty (off) | login user → the certificate principals that may log in as it, written to `/etc/ssh/authorized_principals/<user>`. Requires `TrustedUserCAKeys` |
-| `OPKSSH` | `nil` (off) | optional OIDC sign-in via [opkssh](https://github.com/openpubkey/opkssh), additive to `TrustedUserCAKeys`/`AuthorizedPrincipals` — see `OPKSSHConfig` below |
+| `OPKSSH` | `nil` (off) | optional OIDC sign-in via [opkssh](https://github.com/openpubkey/opkssh), with or without `TrustedUserCAKeys`/`AuthorizedPrincipals` — see `OPKSSHConfig` below |
 | `HostCert` | `nil` (off) | optional SSH host-certificate renewal via [truvity/openbao](https://github.com/truvity/openbao)'s `cmd/openbao-hostcert`, additive to everything above — see `HostCertConfig` below |
 | `RouterSetupVersion` | *required* | `"X.Y.Z"` (no leading `v`) — the truvity/tailscale release the bootstrap downloads `router-setup.sh` from; normally the version this `go.mod` pins |
 
@@ -348,12 +348,17 @@ optional features:
   source/destination check and completes the lifecycle action — retrying 20
   times, 15 seconds apart. Its output goes to `/var/log/tailscale-join.log`
   and to the serial console;
-- when `SSH_USER_CA=true`: the CA keys, one principals file per user and
-  `/etc/ssh/sshd_config.d/10-user-ca.conf` (`PubkeyAuthentication yes`,
-  `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
-  `AuthorizedKeysFile none`, `TrustedUserCAKeys`, `AuthorizedPrincipalsFile`,
+- when `SSH_USER_CA=true` or `OPKSSH=true` — either login path, or both:
+  the SSH login lockdown, `/etc/ssh/sshd_config.d/10-ssh-login.conf`
+  (`PubkeyAuthentication yes`, `PasswordAuthentication no`,
+  `KbdInteractiveAuthentication no`, `AuthorizedKeysFile none`,
   `LogLevel VERBOSE`), then removes `ssh` from the `public` zone so SSH
-  arrives over `tailscale0` only, and runs `sshd -t`;
+  arrives over `tailscale0` only, and runs `sshd -t`. The lockdown belongs
+  to neither path, so dropping certificate login from an opkssh router
+  loosens nothing;
+- when `SSH_USER_CA=true`: the CA keys, one principals file per user and
+  `/etc/ssh/sshd_config.d/10-user-ca.conf` (`TrustedUserCAKeys`,
+  `AuthorizedPrincipalsFile`, nothing else);
 - when `OPKSSH=true`: opkssh, installed by OWN steps rather than opkssh's
   upstream `scripts/install-linux.sh` — that script's OS detection does not
   recognize Amazon Linux 2023 on any release through its own `main` branch,
@@ -373,8 +378,8 @@ optional features:
   drop-in and leaves the previously running sshd, and the certificate-login
   files above (never touched by this step), exactly as they were.
   `AuthorizedKeysCommand` and `TrustedUserCAKeys` are independent sshd
-  mechanisms, so opkssh is additive regardless of whether certificate login
-  is also set;
+  mechanisms, so opkssh works the same whether certificate login is also
+  set or not;
 - when `HOST_CERT=true`: downloads the pinned `openbao-hostcert` archive for
   this package's own architecture (`arm64` — see "The image lookup" above)
   and verifies it against its configured sha256 — a mismatch aborts, fail

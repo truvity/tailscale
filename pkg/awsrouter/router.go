@@ -6,10 +6,13 @@
 // (pkg/tailnet NewRouterKey → the caller's SSM write).
 //
 // SSH is off by default: no key pair, no port in the security group.
-// A caller that sets TrustedUserCAKeys and AuthorizedPrincipals gets
-// sshd admitting OpenSSH user certificates from those CAs only, over
-// the tailnet interface — see ssh.go. There is no other shell (no SSM
-// Session Manager): break-glass is replacing the instance, and
+// Two independent login paths turn it on, either alone or both:
+// TrustedUserCAKeys and AuthorizedPrincipals admit OpenSSH user
+// certificates from those CAs only (ssh.go), and OPKSSH admits OIDC
+// sign-in via opkssh (opkssh.go). Either one gets the same lockdown —
+// no static keys, no passwords, SSH over the tailnet interface only —
+// so dropping one path never loosens the other. There is no other shell
+// (no SSM Session Manager): break-glass is replacing the instance, and
 // diagnosis is the serial console (`aws ec2 get-console-output`),
 // where cloud-init and the join script log.
 //
@@ -97,9 +100,10 @@ type (
 		// TrustedUserCAKeys are the OpenSSH user CA public keys sshd
 		// trusts, one authorized_keys-format line each ("ssh-ed25519
 		// AAAA..."). Two during a CA rotation, otherwise one. Empty (the
-		// default): no certificate login, and the user data renders
-		// exactly as it did before these inputs existed. Requires
-		// AuthorizedPrincipals.
+		// default): no certificate login — no CA trusted, no principals
+		// file — and the user data renders exactly as it did before
+		// these inputs existed; OPKSSH, if set, still gets the full SSH
+		// lockdown on its own. Requires AuthorizedPrincipals.
 		TrustedUserCAKeys []string
 		// AuthorizedPrincipals maps a local login user to the
 		// certificate principals that may log in as it, written to
@@ -111,7 +115,7 @@ type (
 		AuthorizedPrincipals map[string][]string
 
 		// OPKSSH configures optional OIDC sign-in via opkssh
-		// (AuthorizedKeysCommand), additive to the certificate login
+		// (AuthorizedKeysCommand), with or without the certificate login
 		// above — see opkssh.go. nil, or OPKSSH.Enabled false (the
 		// default): the user data renders exactly as it did before this
 		// input existed.
