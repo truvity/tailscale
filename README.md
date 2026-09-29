@@ -132,6 +132,19 @@ cluster's own resolver. The EC2 router fleet for the VPC CIDR is the same
 pattern with `pkg/awsrouter`;
 [docs/reference.md](docs/reference.md#pkgawsrouter) has the worked example.
 
+## Consumers
+
+- **truvity/gitops**: Go modules (`acl`, `tailnet`, `awsrouter`); chart
+  `tailscaled`
+
+## Neighbours
+
+**gateway ↔ cloudflare ↔ tailscale:** three layers of one exposure path.
+Cloudflare's tunnel carries public traffic to the estate's origin; that
+origin is a gateway exposure (ClusterIP behind the tunnel). Tailscale routes
+whole CIDRs for private access: gateway's private exposure and tailscale's
+Service-CIDR route are the two ways to reach a private service.
+
 ## Documentation
 
 - [docs/adoption.md](docs/adoption.md) — prerequisites, install order,
@@ -159,7 +172,7 @@ keys go out as Pulumi Outputs and the **caller** stores them. Everything is
 cloud-agnostic except `pkg/awsrouter`, which is AWS by definition.
 
 This repository follows the shared
-[component contract](https://github.com/truvity/ci-workflows/blob/master/docs/component-contract.md).
+[component contract](https://github.com/truvity/policy/blob/master/docs/contracts/component.md).
 
 ## Status
 

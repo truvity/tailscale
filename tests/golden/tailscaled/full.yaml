@@ -53,7 +53,7 @@ spec:
           operator: Exists
       containers:
         - name: tailscaled
-          image: "tailscale/tailscale:stable"
+          image: "tailscale/tailscale:1.102.4"
           imagePullPolicy: IfNotPresent
           env:
             - name: TS_USERSPACE
