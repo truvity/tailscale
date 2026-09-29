@@ -81,9 +81,9 @@
         }
       }
     },
-    "gopls@latest": {
-      "last_modified": "2026-09-27T03:42:02Z",
-      "resolved": "github:NixOS/nixpkgs/8d5d270900d3fc75655ea2d9d248b234f6631439#gopls",
+    "gopls@0.23.0": {
+      "last_modified": "2026-09-28T04:45:22Z",
+      "resolved": "github:NixOS/nixpkgs/419fe0f449b3fbe3bdd53d9840288db4509ec32e#gopls",
       "source": "devbox-search",
       "version": "0.23.0",
       "systems": {
@@ -119,9 +119,9 @@
         }
       }
     },
-    "goreleaser@latest": {
-      "last_modified": "2026-09-27T03:42:02Z",
-      "resolved": "github:NixOS/nixpkgs/8d5d270900d3fc75655ea2d9d248b234f6631439#goreleaser",
+    "goreleaser@2.17.1": {
+      "last_modified": "2026-09-28T04:45:22Z",
+      "resolved": "github:NixOS/nixpkgs/419fe0f449b3fbe3bdd53d9840288db4509ec32e#goreleaser",
       "source": "devbox-search",
       "version": "2.17.1",
       "systems": {
@@ -195,9 +195,9 @@
         }
       }
     },
-    "just-lsp@latest": {
-      "last_modified": "2026-09-27T03:42:02Z",
-      "resolved": "github:NixOS/nixpkgs/8d5d270900d3fc75655ea2d9d248b234f6631439#just-lsp",
+    "just-lsp@0.9.0": {
+      "last_modified": "2026-09-28T04:45:22Z",
+      "resolved": "github:NixOS/nixpkgs/419fe0f449b3fbe3bdd53d9840288db4509ec32e#just-lsp",
       "source": "devbox-search",
       "version": "0.9.0",
       "systems": {
@@ -233,9 +233,9 @@
         }
       }
     },
-    "just@latest": {
-      "last_modified": "2026-09-27T03:42:02Z",
-      "resolved": "github:NixOS/nixpkgs/8d5d270900d3fc75655ea2d9d248b234f6631439#just",
+    "just@1.58.0": {
+      "last_modified": "2026-09-28T04:45:22Z",
+      "resolved": "github:NixOS/nixpkgs/419fe0f449b3fbe3bdd53d9840288db4509ec32e#just",
       "source": "devbox-search",
       "version": "1.58.0",
       "systems": {
@@ -298,9 +298,9 @@
         }
       }
     },
-    "kubernetes-helm@latest": {
-      "last_modified": "2026-09-27T03:42:02Z",
-      "resolved": "github:NixOS/nixpkgs/8d5d270900d3fc75655ea2d9d248b234f6631439#kubernetes-helm",
+    "kubernetes-helm@4.3.0": {
+      "last_modified": "2026-09-28T04:45:22Z",
+      "resolved": "github:NixOS/nixpkgs/419fe0f449b3fbe3bdd53d9840288db4509ec32e#kubernetes-helm",
       "source": "devbox-search",
       "version": "4.3.0",
       "systems": {
