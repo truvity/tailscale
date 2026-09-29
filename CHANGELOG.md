@@ -5,6 +5,11 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.15.0
+
+- The `tailscaled` chart pins `tailscale/tailscale` to `1.102.4` instead of the floating `stable` tag; Renovate now owns the bump.
+- README gains `Consumers` and `Neighbours`; `docs/doctrine.md` points at the policy component contract; ci-workflows pins moved to v3.13.1.
+
 ## v1.14.0
 
 - **BREAKING: the `tsdns` chart and its CoreDNS image are removed.**
