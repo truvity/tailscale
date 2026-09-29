@@ -10,7 +10,7 @@ replicaCount: 2
 
 image:
   repository: tailscale/tailscale
-  tag: "1.102.4"  # renovate: datasource=docker depName=tailscale/tailscale
+  tag: "v1.102.4"  # renovate: datasource=docker depName=tailscale/tailscale
   pullPolicy: IfNotPresent
 
 serviceAccount:
