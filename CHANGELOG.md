@@ -5,6 +5,41 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.17.0
+
+- **`pkg/awsrouter`: routers get an 8 GiB root volume instead of the
+  image's own.** The launch template had no block device mapping, so the
+  root volume was whatever the image said, and the image lookup
+  (`al2023-ami-*-arm64`, most recent) also matches Amazon's `minimal`
+  images, whose root volume is 2 GiB: a router ran at ~80% full, and
+  cloud-init's 1 GiB swap file failed with ENOSPC. The launch template now
+  maps the image's own root device name (from the lookup, never a
+  constant) to an encrypted EBS volume deleted with the instance, sized by
+  the new `TailscaleInstanceConfig.RootVolume` (`RootVolumeConfig{SizeGiB,
+  Type}`): the zero value is 8 GiB `gp3`, a smaller size than 8 GiB (the
+  standard image's own snapshot) or a type other than `gp3`/`gp2` is
+  refused. Encryption uses the account's default EBS key.
+- **The swap file moves from cloud-init to `router-setup.sh`, and fits
+  the disk.** The user data's `swap:` block is gone; `router-setup.sh`
+  creates the 1 GiB `/swapfile` (and its fstab line) only when the root
+  filesystem has room for it plus 1 GiB kept free, and otherwise logs
+  `swap: skipped, N MiB free on /, need 2048 MiB …` and carries on. A
+  swap file that fails to activate is removed and logged, never a failed
+  setup.
+- **journald is capped at 200 MB** (`/etc/systemd/journald.conf.d/99-size-cap.conf`,
+  `SystemMaxUse=200M`); its default is 10% of the filesystem.
+- **`tailscale-join.sh` is single-flight.** The cloud-final drop-in and
+  the systemd unit both start it at boot, and two concurrent passes raced
+  (a dnf GPG-check failure on the first attempt, a second
+  complete-lifecycle-action with no action left). It now takes `flock -n`
+  on `/run/tailscale-join.lock`; a second pass logs `another pass holds the
+  lock` and exits 0, leaving the join to the first. Without `flock` or a
+  writable `/run`, a pass runs unlocked, as before.
+- Every router's user data changes (the swap block, the pinned
+  `router-setup.sh` digest) and the launch template gains the root
+  volume, so bumping `RouterSetupVersion` is a new launch-template version
+  and a refresh of every router.
+
 ## v1.16.0
 
 - **`pkg/awsrouter`: certificate login can be dropped from an opkssh

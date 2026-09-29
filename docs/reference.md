@@ -243,6 +243,7 @@ func routerFleet(
 | `OPKSSH` | `nil` (off) | optional OIDC sign-in via [opkssh](https://github.com/openpubkey/opkssh), with or without `TrustedUserCAKeys`/`AuthorizedPrincipals` — see `OPKSSHConfig` below |
 | `HostCert` | `nil` (off) | optional SSH host-certificate renewal via [truvity/openbao](https://github.com/truvity/openbao)'s `cmd/openbao-hostcert`, additive to everything above — see `HostCertConfig` below |
 | `RouterSetupVersion` | *required* | `"X.Y.Z"` (no leading `v`) — the truvity/tailscale release the bootstrap downloads `router-setup.sh` from; normally the version this `go.mod` pins |
+| `RootVolume` | 8 GiB `gp3` | `RootVolumeConfig{SizeGiB, Type}`: the root EBS volume, on the image's own root device name, always encrypted (the account's default EBS key) and deleted with the instance. `SizeGiB` 0 is 8, otherwise at least 8 (the standard AL2023 image's own snapshot size); `Type` empty is `gp3`, otherwise `gp3` or `gp2` |
 
 ### `OPKSSHConfig`
 
@@ -292,7 +293,7 @@ The result, `*TailscaleInstanceResult`, carries `SecurityGroupID`,
 |---|---|
 | security group | ingress UDP 41641 (WireGuard) from anywhere, egress everything; **no TCP port** |
 | IAM role and instance profile | trusted by EC2; four inline policies and nothing else: `ssm:GetParameter(s)` on the one `SSMAuthKeyPath` parameter; `kms:Decrypt` on keys aliased `alias/aws/ssm`; `ec2:ModifyInstanceAttribute` and `ec2:DescribeInstances` (to turn off the source/destination check on itself); `autoscaling:CompleteLifecycleAction` on its own ASG. No managed policy |
-| launch template | the newest Amazon Linux 2023 arm64 image (see below), `t4g.micro`, a public address, IMDSv2 required with hop limit 2, the cloud-init user data; each change is a new default version |
+| launch template | the newest Amazon Linux 2023 arm64 image (see below), `t4g.micro`, the `RootVolume` root EBS volume (8 GiB `gp3`, encrypted, by default), a public address, IMDSv2 required with hop limit 2, the cloud-init user data; each change is a new default version |
 | auto-scaling group | the sizes above; a rolling instance refresh on every launch-template change, keeping 0% healthy for one instance and 50% for more, with a 300-second warm-up; optional warm pool (`Stopped`) |
 | lifecycle hook | `<name>-launch` on launch: a router is in service only after it has joined; no signal in 900 seconds abandons it |
 | CloudWatch alarms | CPU above 90% for 15 minutes, and a failed status check; no actions attached |
@@ -315,8 +316,8 @@ deliberately small. It:
 
 - installs the packages `router-setup.sh` needs (chrony, audit,
   dnf-automatic, dnf-utils, firewalld, a few diagnostic tools, and
-  `checkpolicy` when `OPKSSH` is set) and sets up the 1 GiB swap file dnf
-  needs headroom for;
+  `checkpolicy` when `OPKSSH` is set). It sets up no swap file: that is
+  `router-setup.sh`'s, below;
 - writes this router's own small values and feature flags to
   `/etc/tailscale-router/router.env`, plus — only when set —
   `TrustedUserCAKeys`/`AuthorizedPrincipals`, `OPKSSH`'s providers/auth_id
@@ -333,8 +334,13 @@ staged files instead of Go template variables — it is the SAME file for
 every router of a given truvity/tailscale release, with or without the
 optional features:
 
+- a 1 GiB swap file at `/swapfile` (dnf headroom), only when the root
+  filesystem has room for it and 1 GiB more; otherwise it logs
+  `swap: skipped, N MiB free on /, need 2048 MiB …` and carries on. A swap
+  file that fails to activate is removed and logged, never a failed setup;
 - chrony (pinned to the Amazon Time Sync Service), audit (with watch rules on
-  the identity and login files), persistent journald, and
+  the identity and login files), persistent journald capped at 200 MB
+  (`/etc/systemd/journald.conf.d/99-size-cap.conf`, `SystemMaxUse=200M`), and
   `/etc/ssh/sshd_config.d/99-hardening.conf` (`PermitRootLogin no`, always);
 - a nightly job that applies updates and reboots when `needs-restarting -r`
   says so, after a random delay of up to two hours so a fleet does not
@@ -342,7 +348,9 @@ optional features:
 - firewalld: the primary interface in `public` with the WireGuard port and
   masquerading, `tailscale0` in `trusted`;
 - `tailscale-join.sh`, run by a systemd unit and a cloud-final drop-in on
-  every boot: installs Tailscale from its signed repository, reads the key
+  every boot, single-flight (`flock` on `/run/tailscale-join.lock`: when both
+  start at once, the second logs `another pass holds the lock` and leaves
+  the join to the first): installs Tailscale from its signed repository, reads the key
   from `SSMAuthKeyPath`, runs
   `tailscale up --advertise-routes=… --accept-dns=false`, turns off the
   source/destination check and completes the lifecycle action — retrying 20

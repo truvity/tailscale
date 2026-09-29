@@ -22,13 +22,13 @@
 # kernel kills cloud-final, and everything downstream (package install,
 # runcmd, lifecycle-hook completion) dies with it. Patching is handled by
 # dnf-automatic + router-setup.sh's nightly update/reboot script instead,
-# which run with the swap file below already active.
+# which run with router-setup.sh's swap file already active.
 
-# ── Swap — dnf headroom on 512MB instances ───────────────────────────
-swap:
-  filename: /swapfile
-  size: 1073741824
-  maxsize: 1073741824
+# ── Swap: router-setup.sh, not cloud-init ────────────────────────────
+# cloud-init's `swap:` module writes its file unconditionally and fails
+# with ENOSPC on a small root volume. router-setup.sh creates the swap
+# file only when the root filesystem has room for it, and logs a skip
+# otherwise (the root volume itself is sized by the launch template).
 
 # ── Timezone ─────────────────────────────────────────────────────────
 # Explicit UTC — documents intent, avoids DST ambiguity.
@@ -111,10 +111,10 @@ write_files:
 runcmd:
   # Fail closed: a download failure or a checksum mismatch aborts before
   # router-setup.sh ever runs as root, leaving only this small bootstrap
-  # applied (swap, timezone, packages) — never a half-verified script.
+  # applied (timezone, packages) — never a half-verified script.
   - curl -fsSL -o /usr/local/sbin/router-setup.sh "https://github.com/truvity/tailscale/releases/download/v1.11.0/router-setup-v1.11.0.sh"
   - |
-    echo "abfee36c11f8e2b268af0f6f2f51b6e09203b9f061a88415b11142d0d54f21d2  /usr/local/sbin/router-setup.sh" | sha256sum -c - || { echo "router-setup checksum fail"; exit 0; }
+    echo "629bc4f8cd302656860bdbb714f5afd9a9e32cd3aff612edefa9cf29c37b7206  /usr/local/sbin/router-setup.sh" | sha256sum -c - || { echo "router-setup checksum fail"; exit 0; }
   - chmod 0755 /usr/local/sbin/router-setup.sh
   - /usr/local/sbin/router-setup.sh || echo "router-setup fail"
 

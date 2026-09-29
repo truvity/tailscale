@@ -28,6 +28,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -69,7 +70,24 @@ const (
 
 	// primaryInterface is the primary network interface on AL2023 EC2 instances.
 	primaryInterface = "ens5"
+
+	// DefaultRootVolumeSizeGiB is RootVolumeConfig.SizeGiB's default.
+	// The image lookup can resolve to an AL2023 "minimal" image, whose
+	// own root volume is 2 GiB — too small for the packages, a swap file
+	// and the journal. 8 GiB is also the standard image's own size.
+	DefaultRootVolumeSizeGiB = 8
+	// MinRootVolumeSizeGiB is the smallest RootVolumeConfig.SizeGiB
+	// accepted: the standard AL2023 image's snapshot is 8 GiB, and EC2
+	// refuses a root volume smaller than its image's snapshot.
+	MinRootVolumeSizeGiB = 8
+	// DefaultRootVolumeType is RootVolumeConfig.Type's default.
+	DefaultRootVolumeType = "gp3"
 )
+
+// rootVolumeTypes are the EBS volume types RootVolumeConfig.Type
+// accepts: the general-purpose SSD types. A router needs no
+// provisioned IOPS.
+var rootVolumeTypes = map[string]bool{"gp3": true, "gp2": true}
 
 type (
 	// TailscaleInstanceConfig holds configuration for the Tailscale subnet router instance.
@@ -137,6 +155,24 @@ type (
 		// THIS build, which is byte-for-byte what that release
 		// published (see bootstrap.go and docs/safety.md).
 		RouterSetupVersion string
+
+		// RootVolume sizes the router's root EBS volume. The zero value
+		// is DefaultRootVolumeSizeGiB GiB of DefaultRootVolumeType. The
+		// volume is always encrypted (with the account's default EBS
+		// key) and deleted with the instance.
+		RootVolume RootVolumeConfig
+	}
+
+	// RootVolumeConfig is the router's root EBS volume, on the image's
+	// own root device name. Before this input existed the volume was
+	// the image's default size, 2 GiB on a minimal image.
+	RootVolumeConfig struct {
+		// SizeGiB is the volume size. 0 means DefaultRootVolumeSizeGiB;
+		// anything else must be at least MinRootVolumeSizeGiB.
+		SizeGiB int
+		// Type is the EBS volume type, "gp3" or "gp2". Empty means
+		// DefaultRootVolumeType.
+		Type string
 	}
 
 	// TailscaleInstanceResult holds references to all created Tailscale instance resources.
@@ -188,6 +224,60 @@ func boundaryPtr(arn string) pulumi.StringPtrInput {
 	return pulumi.StringPtr(arn)
 }
 
+// sizeGiB is SizeGiB with its default applied.
+func (v RootVolumeConfig) sizeGiB() int {
+	if v.SizeGiB == 0 {
+		return DefaultRootVolumeSizeGiB
+	}
+
+	return v.SizeGiB
+}
+
+// volumeType is Type with its default applied.
+func (v RootVolumeConfig) volumeType() string {
+	if v.Type == "" {
+		return DefaultRootVolumeType
+	}
+
+	return v.Type
+}
+
+// validate refuses a root volume EC2 would refuse at launch (smaller
+// than the image) or that this package does not mean to offer.
+func (v RootVolumeConfig) validate() error {
+	if v.SizeGiB != 0 && v.SizeGiB < MinRootVolumeSizeGiB {
+		return fmt.Errorf("awsrouter: RootVolume.SizeGiB %d is below the minimum %d GiB", v.SizeGiB, MinRootVolumeSizeGiB)
+	}
+
+	if !rootVolumeTypes[v.volumeType()] {
+		return fmt.Errorf("awsrouter: RootVolume.Type %q is not gp3 or gp2", v.Type)
+	}
+
+	return nil
+}
+
+// rootBlockDevice is the launch template's one block device mapping:
+// the image's own root device, resized, encrypted and deleted with the
+// instance. EC2 names the root device per image (/dev/xvda on AL2023),
+// so the name comes from the image lookup, never a constant.
+func rootBlockDevice(deviceName string, v RootVolumeConfig) (ec2.LaunchTemplateBlockDeviceMappingArray, error) {
+	if deviceName == "" {
+		return nil, errors.New("awsrouter: the AL2023 image lookup returned no root device name")
+	}
+
+	return ec2.LaunchTemplateBlockDeviceMappingArray{
+		ec2.LaunchTemplateBlockDeviceMappingArgs{
+			DeviceName: pulumi.String(deviceName),
+			Ebs: ec2.LaunchTemplateBlockDeviceMappingEbsArgs{
+				VolumeSize:          pulumi.Int(v.sizeGiB()),
+				VolumeType:          pulumi.String(v.volumeType()),
+				Encrypted:           pulumi.String("true"),
+				DeleteOnTermination: pulumi.String("true"),
+			},
+		},
+	}, nil
+}
+
 // baseName is the AWS-visible name stem. These live in one shared AWS
 // account namespace — two tailnets' fleets in the same VPC cannot both
 // own the security group "<environment>-tailscale" — so every fleet is
@@ -219,6 +309,10 @@ func CreateTailscaleInstance(
 	}
 
 	if err := config.validateRouterSetupVersion(); err != nil {
+		return nil, err
+	}
+
+	if err := config.RootVolume.validate(); err != nil {
 		return nil, err
 	}
 
@@ -498,8 +592,10 @@ func createTailscaleLaunchTemplate(
 	env := config.Environment
 
 	// Look up latest Amazon Linux 2023 ARM64 AMI.
-	// Using al2023-ami-* (not al2023-ami-minimal-*) because user-data needs AWS CLI
-	// for ssm:GetParameter and ec2:ModifyInstanceAttribute.
+	// The pattern also matches the al2023-ami-minimal-* images (and
+	// resolves to one whenever a minimal image was published last — see
+	// docs/safety.md), whose own root volume is 2 GiB; the explicit root
+	// volume below makes the disk size independent of which one wins.
 	ami, err := ec2.LookupAmi(c, &ec2.LookupAmiArgs{
 		Owners:     []string{"amazon"},
 		MostRecent: pulumi.BoolRef(true),
@@ -516,6 +612,11 @@ func createTailscaleLaunchTemplate(
 	userData := buildTailscaleUserData(config)
 	userDataB64 := base64.StdEncoding.EncodeToString([]byte(userData))
 
+	blockDevices, err := rootBlockDevice(ami.RootDeviceName, config.RootVolume)
+	if err != nil {
+		return nil, err
+	}
+
 	lt, err := ec2.NewLaunchTemplate(c, "tailscale-lt", &ec2.LaunchTemplateArgs{
 		Name:                 pulumi.String(config.baseName()),
 		UpdateDefaultVersion: pulumi.Bool(true),
@@ -525,6 +626,9 @@ func createTailscaleLaunchTemplate(
 		// swap/no-upgrade notes) — 1GB + swap gives dnf real headroom.
 		InstanceType: pulumi.String("t4g.micro"),
 		UserData:     pulumi.String(userDataB64),
+		// The root volume: sized here, not by the image (see
+		// RootVolumeConfig).
+		BlockDeviceMappings: blockDevices,
 		IamInstanceProfile: ec2.LaunchTemplateIamInstanceProfileArgs{
 			Arn: instanceProfile.Arn,
 		},

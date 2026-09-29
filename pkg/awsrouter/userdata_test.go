@@ -254,6 +254,16 @@ func TestValidateSSHUserCA(t *testing.T) {
 	}
 }
 
+// The swap file is router-setup.sh's (created only when the disk has
+// room), never cloud-init's: its `swap:` module writes the file
+// unconditionally and failed with ENOSPC on a 2 GiB root volume.
+func TestUserDataHasNoCloudInitSwap(t *testing.T) {
+	var doc map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(buildTailscaleUserData(exampleConfig())), &doc))
+	assert.NotContains(t, doc, "swap")
+	assert.Contains(t, doc, "packages", "sanity: the document parsed")
+}
+
 // EC2 refuses user data over 16 KiB (before base64). Since the bootstrap
 // split (moving chrony/audit/journald/sshd hardening/the join
 // script/systemd units/the opkssh install steps into router-setup.sh,
