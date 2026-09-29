@@ -19,8 +19,6 @@
 #   - no 'arn:aws' pattern: pkg/awsrouter composes ARNs from caller inputs
 #     (format strings), so the pattern would match the mechanism itself.
 #     A concrete leaked ARN still trips the account-id pattern.
-#   - no in-cluster DNS suffix pattern: tsdns is a DNS rewrite to exactly
-#     that suffix, so its default render contains it by design.
 #
 # Every chart value or module input that names a cluster, an account, a
 # hostname or a secret path is an INPUT with a neutral default; the
@@ -41,6 +39,7 @@ set -uo pipefail
 patterns=(
   '\b[0-9]{12}\b'                          # AWS account id
   '\b[0-9]{12}\.dkr\.ecr\.'              # ECR registry host
+  '\.svc\.cluster\.local'              # in-cluster DNS
   '/secrets/[a-z0-9-]+/'               # SSM parameter paths (narrowed: see the header)
   'truvity-[a-z0-9-]*-(ci-cache|artifacts|state)'   # S3 buckets
   '\.truvity\.(xyz|com|co)'            # internal hostnames

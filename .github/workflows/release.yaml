@@ -29,4 +29,4 @@ jobs:
       packages: write
     uses: truvity/ci-workflows/.github/workflows/release-public.yaml@36c39b754e9a3ab7e6594d19fe9222b66da1586f # v3.12.2
     with:
-      charts: '["tailscaled", "tsdns"]'
+      charts: '["tailscaled"]'

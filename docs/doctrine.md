@@ -1,17 +1,11 @@
 # Doctrine — the design rules
 
-## Five pieces, along the lines that divide them
+## Four pieces, along the lines that divide them
 
 **`charts/tailscaled` makes a cluster reachable.** A plain Deployment in
 userspace mode, not the Tailscale operator: it needs no CRDs, no RBAC, no
 `NET_ADMIN` and no particular CNI, so it installs the same way everywhere
 and removing it leaves nothing behind.
-
-**`charts/tsdns` makes it nameable.** A small CoreDNS whose only job is a
-tailnet-only suffix, a few forwarded zones and, on request, everything else.
-It is separate from the cluster's own resolver because a managed resolver
-often cannot be extended, and because what the tailnet may resolve should
-not depend on what the cluster resolves.
 
 **`pkg/acl` is the policy as a model.** Pure data in, deterministic JSON
 out: no SDK, no cloud, no files. The same model always renders the same
