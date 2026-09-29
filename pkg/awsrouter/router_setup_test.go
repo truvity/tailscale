@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -117,6 +118,11 @@ extract_binary() {
   printf 'fixture-binary-for:%s\n' "$1" > "$2/$3"
   return 0
 }
+# An 8 GiB root volume after the image's own ~1.6 GiB: room for swap.
+free_mib() { echo 6300; }
+swap_active() { return 1; }
+swap_alloc() { echo "swap_alloc $*" >> "$ROOT/calls.log"; : > "$1"; }
+swap_on() { echo "swap_on $*" >> "$ROOT/calls.log"; }
 `
 
 func mustRead(t *testing.T, path string) string {
@@ -147,10 +153,12 @@ func TestRouterSetupDefaultEffectiveConfig(t *testing.T) {
 	root, _ := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs)
 
 	for path, sentinel := range map[string]string{
-		"etc/chrony.d/99-hardening.conf":                                  "server 169.254.169.123 prefer iburst minpoll 4 maxpoll 6",
-		"etc/sysctl.d/99-tailscale.conf":                                  "net.ipv4.ip_forward=1",
-		"etc/audit/rules.d/99-iso27001.rules":                             "-w /etc/passwd -p wa -k identity",
-		"etc/systemd/journald.conf.d/99-persistent.conf":                  "Storage=persistent",
+		"etc/chrony.d/99-hardening.conf":                 "server 169.254.169.123 prefer iburst minpoll 4 maxpoll 6",
+		"etc/sysctl.d/99-tailscale.conf":                 "net.ipv4.ip_forward=1",
+		"etc/audit/rules.d/99-iso27001.rules":            "-w /etc/passwd -p wa -k identity",
+		"etc/systemd/journald.conf.d/99-persistent.conf": "Storage=persistent",
+		"etc/systemd/journald.conf.d/99-size-cap.conf":   "SystemMaxUse=200M",
+		"etc/fstab": "/swapfile none swap sw 0 0",
 		"etc/ssh/sshd_config.d/99-hardening.conf":                         "PermitRootLogin no",
 		"etc/yum.repos.d/tailscale.repo":                                  "baseurl=https://pkgs.tailscale.com/stable/amazon-linux/2023/$basearch",
 		"etc/systemd/system/cloud-final.service.d/99-tailscale-join.conf": "ExecStartPost=-/usr/local/sbin/tailscale-join.sh",
@@ -167,6 +175,8 @@ func TestRouterSetupDefaultEffectiveConfig(t *testing.T) {
 	assert.Contains(t, join, "--lifecycle-hook-name example-tailscale-acme-launch")
 	assert.Contains(t, join, "--auto-scaling-group-name example-tailscale-acme")
 	assert.Contains(t, join, "--name /tailscale/acme/auth-key")
+	assert.Contains(t, join, "LOCK=/run/tailscale-join.lock")
+	assert.Contains(t, join, "flock -n 9", "the join is single-flight")
 
 	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-ssh-login.conf"))
 	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
@@ -179,6 +189,8 @@ func TestRouterSetupDefaultEffectiveConfig(t *testing.T) {
 	mustNotExist(t, filepath.Join(root, "etc/systemd/system/openbao-hostcert.timer"))
 
 	calls := mustRead(t, filepath.Join(root, "calls.log"))
+	assert.Contains(t, calls, "swap_alloc "+filepath.Join(root, "swapfile")+" 1024")
+	assert.Contains(t, calls, "swap_on "+filepath.Join(root, "swapfile"))
 	assert.Contains(t, calls, "fw --permanent --zone=public --add-interface=ens5")
 	assert.Contains(t, calls, "fw --permanent --zone=public --add-port=41641/udp")
 	assert.NotContains(t, calls, "remove-service=ssh")
@@ -591,6 +603,97 @@ OPKSSH_SELINUX_SHA256="f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb95
 	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/60-opk-ssh.conf"))
 	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf"))
 	assert.FileExists(t, filepath.Join(root, "usr/local/bin/openbao-hostcert"))
+}
+
+// ── Swap: only when the disk has room, never a failed setup ────────────
+
+// A root filesystem without room for the swap file plus the space kept
+// free after it skips the swap file with a log line, and the rest of
+// the setup still runs: the ENOSPC a 2 GiB root volume gave cloud-init's
+// own swap module must not recur as a failure here.
+func TestRouterSetupSwapSkippedWhenDiskIsFull(t *testing.T) {
+	root, out := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs+`
+free_mib() { echo 418; }
+`)
+
+	assert.Contains(t, out, "swap: skipped, 418 MiB free on /, need 2048 MiB")
+	assert.Contains(t, out, "router-setup: done")
+	mustNotExist(t, filepath.Join(root, "swapfile"))
+	mustNotExist(t, filepath.Join(root, "etc/fstab"))
+	assert.NotContains(t, mustRead(t, filepath.Join(root, "calls.log")), "swap_alloc")
+}
+
+// An unreadable free-space figure is a skip too, never an arithmetic
+// error that aborts the setup.
+func TestRouterSetupSwapSkippedWhenFreeSpaceUnknown(t *testing.T) {
+	root, out := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs+`
+free_mib() { echo ""; }
+`)
+
+	assert.Contains(t, out, "swap: skipped, unknown MiB free on /")
+	assert.Contains(t, out, "router-setup: done")
+	mustNotExist(t, filepath.Join(root, "swapfile"))
+}
+
+// A swap file that cannot be activated is removed and logged; it never
+// reaches fstab (a stale fstab entry would fail every later boot's
+// swapon) and never fails the setup.
+func TestRouterSetupSwapActivationFailureIsNotFatal(t *testing.T) {
+	root, out := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs+`
+swap_on() { return 1; }
+`)
+
+	assert.Contains(t, out, "swap: creating /swapfile failed, continuing without swap")
+	assert.Contains(t, out, "router-setup: done")
+	mustNotExist(t, filepath.Join(root, "swapfile"))
+	mustNotExist(t, filepath.Join(root, "etc/fstab"))
+}
+
+// An already active swap file is left alone, and the fstab line is
+// never written twice.
+func TestRouterSetupSwapAlreadyActive(t *testing.T) {
+	root, out := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs+`
+swap_active() { return 0; }
+`)
+
+	assert.Contains(t, out, "swap: /swapfile already active")
+	assert.NotContains(t, mustRead(t, filepath.Join(root, "calls.log")), "swap_alloc")
+}
+
+// ── The join is single-flight ──────────────────────────────────────────
+
+// Runs the join script router-setup.sh writes, for real, while another
+// process holds its lock: the second pass must leave without doing
+// anything (no "boot pass", so no dnf, no tailscale up, no lifecycle
+// call). The script's absolute paths are pointed into a temp dir.
+func TestJoinScriptSecondPassLeavesTheJoinToTheFirst(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed")
+	}
+
+	root, _ := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs)
+	tmp := t.TempDir()
+	lock := filepath.Join(tmp, "join.lock")
+
+	join := mustRead(t, filepath.Join(root, "usr/local/sbin/tailscale-join.sh"))
+	join = strings.ReplaceAll(join, "LOCK=/run/tailscale-join.lock", "LOCK="+shellQuote(lock))
+	join = strings.ReplaceAll(join, "MARKER=/var/lib/tailscale-join.done", "MARKER="+shellQuote(filepath.Join(tmp, "marker")))
+	join = strings.ReplaceAll(join, "/var/log/tailscale-join.log", filepath.Join(tmp, "join.log"))
+
+	script := filepath.Join(tmp, "tailscale-join.sh")
+	require.NoError(t, os.WriteFile(script, []byte(join), 0o755))
+
+	f, err := os.Create(lock)
+	require.NoError(t, err)
+
+	defer func() { _ = f.Close() }()
+
+	require.NoError(t, syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
+
+	out, err := exec.Command("bash", script).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "another pass holds the lock; leaving the join to it")
+	assert.NotContains(t, string(out), "boot pass")
 }
 
 // ── router-setup.sh's own checksum, as pinned by the bootstrap ─────────

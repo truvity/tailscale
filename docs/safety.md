@@ -129,7 +129,12 @@ replaces a security group whose description changes, so it stays.
 A 512 MB instance was OOM-killed by the first-boot package pass, which took
 cloud-init and everything after it down. So the instance is `t4g.micro` with
 a swap file, and there is no `package_upgrade` at first boot: dnf-automatic
-and the nightly job patch once swap exists. Recent Amazon Linux images reboot
+and the nightly job patch once swap exists. The swap file is
+`router-setup.sh`'s, created only when the root filesystem has room for it;
+before v1.17.0 it was cloud-init's `swap:` module, which on a 2 GiB root
+volume failed with ENOSPC and left the router with no swap at all. The root
+volume is sized by the launch template (`RootVolume`, 8 GiB by default), not
+by the image, and the persistent journal is capped at 200 MB. Recent Amazon Linux images reboot
 in the middle of the first boot, which kills cloud-init's run-once phases; the
 join therefore lives in an idempotent systemd unit that runs on every boot,
 and the lifecycle hook allows 15 minutes for it.
@@ -252,7 +257,9 @@ also matches Amazon's `minimal` images and every kernel line
 picks whichever was published last, which can be a minimal image. The code's
 own comment excludes minimal images because the join needs the AWS CLI. Until
 the pattern is narrowed, check which image a preview resolves to before
-applying it.
+applying it. A minimal image's own root volume is 2 GiB; since v1.17.0 the
+launch template sets the root volume explicitly (`RootVolume`, 8 GiB by
+default), so the disk no longer depends on which family won.
 
 ### Rotating the router SSH CA
 

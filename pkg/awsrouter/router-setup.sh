@@ -1,6 +1,7 @@
 #!/bin/bash
-# router-setup.sh — the Tailscale subnet router's setup logic: chrony,
-# audit rules, persistent journald, sshd hardening, the tailnet repo and
+# router-setup.sh — the Tailscale subnet router's setup logic: a swap
+# file when the disk has room, chrony, audit rules, persistent and
+# size-capped journald, sshd hardening, the tailnet repo and
 # join unit, optional SSH user-certificate login (ssh.go), optional
 # opkssh OIDC sign-in (opkssh.go) — either of which gets the SSH login
 # lockdown — and optional SSH host-certificate renewal via
@@ -103,6 +104,54 @@ fetch_verify() {
 extract_binary() {
   tar -xzf "$1" -C "$2" "$3"
 }
+# The swap file's host operations: free space, allocation and
+# activation. Functions for the same reason as the ones above: a test
+# cannot swapon, and picks the free space it wants to exercise.
+free_mib() { df --output=avail -BM "$1" | tail -n 1 | tr -dc '0-9'; }
+swap_active() { swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$1"; }
+swap_alloc() {
+  fallocate -l "${2}M" "$1" 2>/dev/null || dd if=/dev/zero of="$1" bs=1M count="$2" status=none
+}
+swap_on() { mkswap "$1" >/dev/null && swapon "$1"; }
+
+# ── Swap ───────────────────────────────────────────────────────────────
+#
+# dnf headroom (the join's tailscale install, dnf-automatic, the nightly
+# upgrade) on a 1 GB instance. Created here, not by cloud-init's `swap:`
+# module, because that one writes its file unconditionally: on a 2 GiB
+# root volume it failed with ENOSPC and left no swap at all. This one
+# checks first, and a disk without room is a logged skip, never a failed
+# setup: a router without swap still routes.
+
+SWAP_FILE=/swapfile
+SWAP_MIB=1024
+# Free space the root filesystem keeps AFTER the swap file exists: the
+# journal (capped below), dnf's cache and the nightly upgrade live there.
+SWAP_RESERVE_MIB=1024
+
+setup_swap() {
+  local f="$ROOT$SWAP_FILE" free need
+  if swap_active "$SWAP_FILE"; then
+    log "swap: $SWAP_FILE already active"
+    return 0
+  fi
+  need=$((SWAP_MIB + SWAP_RESERVE_MIB))
+  free="$(free_mib "$ROOT/")"
+  if [ -z "$free" ] || [ "$free" -lt "$need" ]; then
+    log "swap: skipped, ${free:-unknown} MiB free on /, need ${need} MiB (${SWAP_MIB} MiB swap + ${SWAP_RESERVE_MIB} MiB kept free)"
+    return 0
+  fi
+  rm -f "$f"
+  if ! { swap_alloc "$f" "$SWAP_MIB" && chmod 0600 "$f" && swap_on "$f"; }; then
+    log "swap: creating $SWAP_FILE failed, continuing without swap"
+    rm -f "$f"
+    return 0
+  fi
+  if ! grep -qs "^$SWAP_FILE[[:space:]]" "$ROOT/etc/fstab"; then
+    echo "$SWAP_FILE none swap sw 0 0" >>"$ROOT/etc/fstab"
+  fi
+  log "swap: ${SWAP_MIB} MiB at $SWAP_FILE active (${free} MiB was free)"
+}
 
 # ── Static configuration (identical on every router) ──────────────────
 
@@ -133,6 +182,12 @@ EOF
   cat >"$ROOT/etc/systemd/journald.conf.d/99-persistent.conf" <<'EOF'
 [Journal]
 Storage=persistent
+EOF
+  # journald's own default is 10% of the filesystem (up to 4 GiB); a
+  # fixed cap keeps the persistent journal from growing with the disk.
+  cat >"$ROOT/etc/systemd/journald.conf.d/99-size-cap.conf" <<'EOF'
+[Journal]
+SystemMaxUse=200M
 EOF
 
   mkdir -p "$ROOT/etc/ssh/sshd_config.d"
@@ -232,9 +287,27 @@ write_join_script() {
 # stopped instance starts into service — completion must run every boot.
 set -uo pipefail
 MARKER=/var/lib/tailscale-join.done
+LOCK=/run/tailscale-join.lock
 # Log file AND stdout: both callers send stdout to the serial console,
 # so \`aws ec2 get-console-output\` shows a join failing without a shell.
 exec > >(tee -a /var/log/tailscale-join.log) 2>&1
+# Single-flight: the cloud-final drop-in and the systemd unit both start
+# this script at boot, at the same moment, and two concurrent passes
+# raced each other (a dnf GPG-check failure, a second
+# complete-lifecycle-action with no action left). The pass holding the
+# lock does the whole job; a second one leaves it to that pass. The lock
+# is opened after the tee above, so tee never inherits it, and /run is
+# emptied every boot, so a lock never outlives its boot. No lock at all
+# (no flock binary, /run not writable) runs the pass unlocked, as before
+# this lock existed, rather than skipping the join on every boot.
+if command -v flock >/dev/null 2>&1 && exec 9>"\$LOCK"; then
+  if ! flock -n 9; then
+    echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') tailscale-join: another pass holds the lock; leaving the join to it"
+    exit 0
+  fi
+else
+  echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') tailscale-join: no lock (flock or \$LOCK unavailable); running unlocked"
+fi
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') tailscale-join boot pass (marker: \$([ -f \$MARKER ] && echo present || echo absent))"
 
 complete_hook() {
@@ -566,6 +639,8 @@ EOF
 main() {
   # shellcheck disable=SC1091
   source "$CONF_DIR/router.env"
+
+  setup_swap
 
   write_static_files
   write_join_script
