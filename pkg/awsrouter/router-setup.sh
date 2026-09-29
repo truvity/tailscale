@@ -2,8 +2,9 @@
 # router-setup.sh — the Tailscale subnet router's setup logic: chrony,
 # audit rules, persistent journald, sshd hardening, the tailnet repo and
 # join unit, optional SSH user-certificate login (ssh.go), optional
-# opkssh OIDC sign-in (opkssh.go), and optional SSH host-certificate
-# renewal via truvity/openbao's cmd/openbao-hostcert (hostcert.go).
+# opkssh OIDC sign-in (opkssh.go) — either of which gets the SSH login
+# lockdown — and optional SSH host-certificate renewal via
+# truvity/openbao's cmd/openbao-hostcert (hostcert.go).
 #
 # GENERIC and VERSION-PINNED. Every router — any environment, any
 # tailnet, with or without the optional features — downloads this SAME
@@ -281,18 +282,38 @@ EOF
   chmod 0755 "$ROOT/usr/local/sbin/tailscale-join.sh"
 }
 
+# ── SSH login lockdown — whenever ANY login path is configured ─────────
+#
+# ssh.go's certificates and opkssh.go's AuthorizedKeysCommand are two
+# independent login paths. Either one alone, or both, makes this router
+# an SSH host, and every SSH host gets the same lockdown: no static keys,
+# no passwords, sshd off the primary interface's firewalld zone (SSH over
+# tailscale0 only), and each login logged. Neither path owns it, so
+# dropping one path never loosens the other's.
+
+ssh_login_enabled() {
+  [ "${SSH_USER_CA:-false}" = "true" ] || [ "${OPKSSH:-false}" = "true" ]
+}
+
+setup_ssh_login() {
+  mkdir -p "$ROOT/etc/ssh/sshd_config.d"
+  cat >"$ROOT/etc/ssh/sshd_config.d/10-ssh-login.conf" <<'EOF'
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthorizedKeysFile none
+LogLevel VERBOSE
+EOF
+  chmod 0600 "$ROOT/etc/ssh/sshd_config.d/10-ssh-login.conf"
+}
+
 # ── SSH user certificates (ssh.go) — additive, never touched by opkssh ─
 
 setup_ssh_user_ca() {
   mkdir -p "$ROOT/etc/ssh/sshd_config.d"
   cat >"$ROOT/etc/ssh/sshd_config.d/10-user-ca.conf" <<'EOF'
-PubkeyAuthentication yes
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-AuthorizedKeysFile none
 TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pub
 AuthorizedPrincipalsFile /etc/ssh/authorized_principals/%u
-LogLevel VERBOSE
 EOF
   chmod 0600 "$ROOT/etc/ssh/sshd_config.d/10-user-ca.conf"
 
@@ -549,6 +570,10 @@ main() {
   write_static_files
   write_join_script
 
+  if ssh_login_enabled; then
+    setup_ssh_login
+  fi
+
   if [ "${SSH_USER_CA:-false}" = "true" ]; then
     setup_ssh_user_ca
   fi
@@ -573,12 +598,12 @@ main() {
   fw --permanent --zone=public --add-port="$WIREGUARD_PORT"/udp
   fw --permanent --zone=public --add-masquerade
   fw --permanent --zone=trusted --add-interface=tailscale0
-  if [ "${SSH_USER_CA:-false}" = "true" ]; then
+  if ssh_login_enabled; then
     fw --permanent --zone=public --remove-service=ssh
   fi
   fw --reload
 
-  if [ "${SSH_USER_CA:-false}" = "true" ]; then
+  if ssh_login_enabled; then
     sshd_check
   fi
 

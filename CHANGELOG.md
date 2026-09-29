@@ -5,6 +5,27 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.16.0
+
+- **`pkg/awsrouter`: certificate login can be dropped from an opkssh
+  router without loosening it.** The SSH lockdown (`PubkeyAuthentication
+  yes`, `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+  `AuthorizedKeysFile none`, `LogLevel VERBOSE`), taking `ssh` off the
+  `public` firewalld zone, and the `sshd -t` gate after it now belong to
+  neither login path: `router-setup.sh` writes them to their own
+  `/etc/ssh/sshd_config.d/10-ssh-login.conf` whenever `TrustedUserCAKeys`
+  **or** `OPKSSH` is set, and `10-user-ca.conf` keeps only
+  `TrustedUserCAKeys` and `AuthorizedPrincipalsFile`. Before this, the
+  lockdown rode on certificate login alone, so an opkssh-only router kept
+  static-key login possible (`AuthorizedKeysFile` at sshd's default) and
+  `ssh` in the `public` zone — contrary to `docs/safety.md`, which already
+  said either input puts SSH on `tailscale0` only. No input changes:
+  empty `TrustedUserCAKeys`/`AuthorizedPrincipals` with `OPKSSH` set now
+  means "opkssh, no CA trusted, fully locked down". A router with neither
+  input renders and behaves as before (`TestRouterSetupDefaultEffectiveConfig`);
+  `TestRouterSetupSSHLoginLockdownIndependentOfUserCA` pins the lockdown
+  for certificates only, opkssh only, and both.
+
 ## v1.15.0
 
 - The `tailscaled` chart pins `tailscale/tailscale` to `1.102.4` instead of the floating `stable` tag; Renovate now owns the bump.

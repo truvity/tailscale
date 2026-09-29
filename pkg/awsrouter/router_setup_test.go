@@ -168,6 +168,7 @@ func TestRouterSetupDefaultEffectiveConfig(t *testing.T) {
 	assert.Contains(t, join, "--auto-scaling-group-name example-tailscale-acme")
 	assert.Contains(t, join, "--name /tailscale/acme/auth-key")
 
+	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-ssh-login.conf"))
 	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
 	mustNotExist(t, filepath.Join(root, "etc/ssh/trusted-user-ca-keys.pub"))
 	mustNotExist(t, filepath.Join(root, "etc/opk/providers"))
@@ -181,6 +182,7 @@ func TestRouterSetupDefaultEffectiveConfig(t *testing.T) {
 	assert.Contains(t, calls, "fw --permanent --zone=public --add-interface=ens5")
 	assert.Contains(t, calls, "fw --permanent --zone=public --add-port=41641/udp")
 	assert.NotContains(t, calls, "remove-service=ssh")
+	assert.NotContains(t, calls, "sshd_check")
 	assert.NotContains(t, calls, "pkg_remove ec2-instance-connect")
 	assert.NotContains(t, calls, "ensure_user_group")
 	assert.NotContains(t, calls, "extract_binary")
@@ -202,26 +204,95 @@ func TestRouterSetupSSHUserCA(t *testing.T) {
 	assert.Equal(t, staged["authorized_principals/ec2-user"], mustRead(t, filepath.Join(root, "etc/ssh/authorized_principals/ec2-user")))
 	assert.Equal(t, staged["authorized_principals/operator"], mustRead(t, filepath.Join(root, "etc/ssh/authorized_principals/operator")))
 
-	sshd := mustRead(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
-	for _, line := range []string{
-		"TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pub",
-		"AuthorizedPrincipalsFile /etc/ssh/authorized_principals/%u",
-		"AuthorizedKeysFile none",
-		"LogLevel VERBOSE",
-	} {
-		assert.Contains(t, sshd, line)
-	}
+	assert.Equal(t,
+		"TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pub\n"+
+			"AuthorizedPrincipalsFile /etc/ssh/authorized_principals/%u\n",
+		mustRead(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf")),
+		"the certificate drop-in carries the CA trust and nothing else")
 
 	info, err := os.Stat(filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 
-	calls := mustRead(t, filepath.Join(root, "calls.log"))
-	assert.Contains(t, calls, "fw --permanent --zone=public --remove-service=ssh")
-	assert.Contains(t, calls, "sshd_check")
+	assertSSHLoginLockdown(t, root)
 
 	// The 99-hardening.conf drop-in is untouched.
 	assert.Contains(t, mustRead(t, filepath.Join(root, "etc/ssh/sshd_config.d/99-hardening.conf")), "PermitRootLogin no")
+}
+
+// ── The SSH login lockdown, shared by both login paths ─────────────────
+
+// sshLoginLockdown is 10-ssh-login.conf, byte for byte.
+const sshLoginLockdown = `PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthorizedKeysFile none
+LogLevel VERBOSE
+`
+
+// assertSSHLoginLockdown checks what every router with a login path
+// gets, whichever path it is: the lockdown drop-in (0600), sshd off the
+// public zone exactly once, and sshd -t before anything reloads it.
+func assertSSHLoginLockdown(t *testing.T, root string) {
+	t.Helper()
+
+	path := filepath.Join(root, "etc/ssh/sshd_config.d/10-ssh-login.conf")
+	assert.Equal(t, sshLoginLockdown, mustRead(t, path))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+	calls := mustRead(t, filepath.Join(root, "calls.log"))
+	assert.Equal(t, 1, strings.Count(calls, "fw --permanent --zone=public --remove-service=ssh"))
+	assert.Contains(t, calls, "sshd_check")
+}
+
+// Dropping certificate login from a router that keeps opkssh must leave
+// it exactly as locked down as before: the lockdown belongs to neither
+// path. Every combination of the two login inputs renders the same
+// 10-ssh-login.conf; only certificate login adds its trust files.
+func TestRouterSetupSSHLoginLockdownIndependentOfUserCA(t *testing.T) {
+	cases := map[string]struct {
+		userCA, opkssh bool
+	}{
+		"certificates only": {userCA: true},
+		"opkssh only":       {opkssh: true},
+		"both":              {userCA: true, opkssh: true},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := baseEnv
+			staged := map[string]string{}
+
+			if tc.opkssh {
+				env = opksshEnv()
+				staged["opkssh-providers"] = "https://access.example.com opkssh 24h\n"
+				staged["opkssh-auth_id"] = "ec2-user oidc:groups:ssh-admins https://access.example.com\n"
+			}
+
+			if tc.userCA {
+				env = strings.Replace(env, `SSH_USER_CA="false"`, `SSH_USER_CA="true"`, 1)
+				staged["trusted-user-ca-keys.pub"] = "ssh-ed25519 AAAAexample current\n"
+				staged["authorized_principals/ec2-user"] = "ec2-user\n"
+			}
+
+			root, _ := routerSetupHarness(t, env, staged, noopSystemFuncs)
+
+			assertSSHLoginLockdown(t, root)
+
+			if tc.userCA {
+				assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
+				assert.FileExists(t, filepath.Join(root, "etc/ssh/trusted-user-ca-keys.pub"))
+				assert.FileExists(t, filepath.Join(root, "etc/ssh/authorized_principals/ec2-user"))
+			} else {
+				mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
+				mustNotExist(t, filepath.Join(root, "etc/ssh/trusted-user-ca-keys.pub"))
+				mustNotExist(t, filepath.Join(root, "etc/ssh/authorized_principals"))
+			}
+		})
+	}
 }
 
 // ── opkssh: the fixed AL2023 install path ─────────────────────────────
@@ -273,6 +344,11 @@ func TestRouterSetupOPKSSHInstall(t *testing.T) {
 	// The certificate path's own files are never named by opkssh.
 	mustNotExist(t, filepath.Join(root, "etc/ssh/trusted-user-ca-keys.pub"))
 	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
+	mustNotExist(t, filepath.Join(root, "etc/ssh/authorized_principals"))
+
+	// opkssh alone is an SSH host too: the same lockdown certificate
+	// login gets, with no certificate trust anywhere.
+	assertSSHLoginLockdown(t, root)
 
 	calls := mustRead(t, filepath.Join(root, "calls.log"))
 	dnfIdx := strings.Index(calls, "pkg_remove ec2-instance-connect")
@@ -308,7 +384,9 @@ fetch_verify() { echo "fetch_verify $*" >> "$ROOT/calls.log"; return 1; }
 	mustNotExist(t, filepath.Join(root, "usr/local/bin/opkssh"))
 
 	calls := mustRead(t, filepath.Join(root, "calls.log"))
-	assert.NotContains(t, calls, "sshd_check", "a failed download must never reach the sshd -t gate")
+	assert.Equal(t, 1, strings.Count(calls, "sshd_check"),
+		"only the lockdown's own sshd -t runs: a failed download must never reach setup_opkssh's gate")
+	assert.NotContains(t, calls, "svc_reload_or_restart", "a failed download must never reload sshd")
 }
 
 // sshd -t failing after an otherwise-successful install removes only
@@ -436,6 +514,10 @@ func TestRouterSetupHostCertInstall(t *testing.T) {
 	calls := mustRead(t, filepath.Join(root, "calls.log"))
 	assert.Contains(t, calls, "sshd_check")
 	assert.Contains(t, calls, "svc_enable_now openbao-hostcert.timer")
+
+	// A host certificate opens no login: no lockdown, no firewall change.
+	mustNotExist(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-ssh-login.conf"))
+	assert.NotContains(t, calls, "remove-service=ssh")
 }
 
 func TestRouterSetupHostCertNoCABundleSkipsCACert(t *testing.T) {
@@ -504,6 +586,7 @@ OPKSSH_SELINUX_SHA256="f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb95
 
 	root, _ := routerSetupHarness(t, env, staged, noopSystemFuncs)
 
+	assertSSHLoginLockdown(t, root)
 	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/10-user-ca.conf"))
 	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/60-opk-ssh.conf"))
 	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf"))

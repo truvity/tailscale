@@ -140,7 +140,9 @@ A router has **no interactive access** other than SSH with a certificate
 signed by a CA in `TrustedUserCAKeys`, or an identity in `OPKSSH`'s
 `AuthorizedIdentities` (opkssh), and none at all when both inputs are empty:
 no key pair, no TCP port in the security group, no Session Manager. With
-either SSH input set, SSH arrives over `tailscale0` only, so the tailnet
+either SSH input set, SSH arrives over `tailscale0` only (before v1.16.0,
+only certificate login took `ssh` off the `public` zone; an opkssh-only
+router kept it there, closed only by the security group), so the tailnet
 policy must let the holders reach the router's tag on port 22 (`pkg/acl`
 grants `tag:<router>:*` to every VPC-tier group; the certificate or the ID
 token decides who logs in). A certificate is refused when it has expired,
@@ -150,8 +152,13 @@ matches the login user, group and issuer. `TrustedUserCAKeys` (certificate
 login) and `AuthorizedKeysCommand` (opkssh) are independent sshd
 mechanisms — sshd tries each configured one in turn for pubkey auth — so
 both can be set on the same router at once, and a router can carry either,
-both, or neither. Each login logs the certificate's key id and serial, or
-(for opkssh) the identity opkssh extracts from the verified ID token.
+both, or neither. The lockdown — `AuthorizedKeysFile none`, no password or
+keyboard-interactive login, `LogLevel VERBOSE`, `ssh` off the `public`
+zone — is one drop-in (`10-ssh-login.conf`) that either input turns on,
+so removing certificate trust from an opkssh router (to retire a CA, or
+because nothing signs for it any more) drops only the CA and principals
+files. Each login logs the certificate's key id and serial, or (for
+opkssh) the identity opkssh extracts from the verified ID token.
 
 **Diagnose a router that did not join** from the serial console, no shell
 needed. cloud-init and the join script both write there, one line per attempt:
