@@ -1,13 +1,12 @@
 # tailscale
 
-Tailscale for Kubernetes estates, as reusable mechanism: the subnet routers
-and the DNS gateway that put a cluster on a tailnet, and the tailnet's policy,
-keys and split DNS as code.
+Tailscale for Kubernetes estates, as reusable mechanism: the subnet router
+that puts a cluster on a tailnet, and the tailnet's policy, keys and split
+DNS as code.
 
 | Artifact | What | Status |
 |---|---|---|
 | `charts/tailscaled` | Subnet router: userspace `tailscaled` as a plain Deployment, advertising the CIDRs you name | shipped |
-| `charts/tsdns` | Split-DNS gateway: CoreDNS on a pinned ClusterIP serving a tailnet-only suffix, plus forwarded zones | shipped |
 | `pkg/acl` | Pure tailnet policy builder: tag ownership, two access tiers, per-environment route auto-approval, from a neutral model; deterministic JSON out | shipped |
 | `pkg/tailnet` | Pulumi Go: the policy resource (sole owner), router auth keys (ephemeral, tagged, rotated by name), split DNS, S3 flow logs, a pinned service-IP helper | shipped |
 | `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet (security group, least-privilege role, launch template, ASG with optional warm pool), optional SSH user-certificate login and optional OIDC sign-in via opkssh; the one cloud-specific package | shipped |
@@ -37,20 +36,13 @@ A **router** is a tailnet node that advertises routes: the EC2 fleet
 the **policy** (`pkg/acl`) says which directory groups reach which CIDRs,
 which tag owns which, and which tag may advertise which route without a
 person approving it. **Keys** (`pkg/tailnet`) are minted per tag after the
-policy exists. The **DNS gateway** (`charts/tsdns`) makes the Services
-nameable under a suffix that exists only on the tailnet.
+policy exists. **Split DNS** (`pkg/tailnet`) points one domain at a resolver
+of your own for every tailnet client.
 
 ```
-tailnet client ──(split DNS: cluster.<name> → tsdns ClusterIP)──▶ tsdns ──▶ cluster resolver
-       │
-       ├──(route: Service CIDR)──▶ tailscaled (in the cluster) ──▶ Services
-       └──(route: VPC CIDR)──────▶ EC2 router fleet ─────────────▶ nodes, VPC endpoints
+tailnet client ──(route: Service CIDR)──▶ tailscaled (in the cluster) ──▶ Services
+       └────────(route: VPC CIDR)──────▶ EC2 router fleet ─────────────▶ nodes, VPC endpoints
 ```
-
-`foo.bar.svc.cluster.<name>` resolves over the tailnet to a Service address
-the cluster's router carries you to. The suffix is deliberately not the
-cluster domain: those names resolve only over the tailnet, and two clusters
-never collide.
 
 ## Install and a worked example
 
@@ -107,8 +99,9 @@ func main() {
 		// the Secret the tailscaled chart reads.
 		ctx.Export("k8sRouterAuthKey", key.Key)
 
-		// tsdns's pinned address: .0.53 of the Service CIDR.
-		dnsIP, err := tailnet.ServiceIP("172.20.0.0/16", 53)
+		// Point the tailnet's split DNS at the cluster's own resolver
+		// (its Service CIDR's .0.10, the usual kube-dns/CoreDNS address).
+		dnsIP, err := tailnet.ServiceIP("172.20.0.0/16", 10)
 		if err != nil {
 			return err
 		}
@@ -124,8 +117,6 @@ The cluster side, once the key is in a Secret named `tailscaled-auth-key`
 ```sh
 helm install tailscaled oci://ghcr.io/truvity/charts/tailscaled --version <tag> \
   --namespace tailscale-router --values tailscaled-values.yaml
-helm install tsdns oci://ghcr.io/truvity/charts/tsdns --version <tag> \
-  --namespace tailscale-dns-system --values tsdns-values.yaml
 ```
 
 ```yaml
@@ -135,16 +126,10 @@ advertiseRoutes: "172.20.0.0/16,10.0.0.0/16"
 hostname: k8s-example-router
 ```
 
-```yaml
-# tsdns-values.yaml
-suffix: cluster.example
-clusterIP: 172.20.0.53     # the split-DNS entry above names it
-resolverIP: 172.20.0.10    # the cluster's own resolver
-```
-
-A client in `operators@example.com` now resolves
-`foo.bar.svc.cluster.example` and reaches the Service. The EC2 router fleet
-for the VPC CIDR is the same pattern with `pkg/awsrouter`;
+A client in `operators@example.com` now reaches the Service CIDR directly,
+and the split DNS entry above resolves `cluster.example` names against the
+cluster's own resolver. The EC2 router fleet for the VPC CIDR is the same
+pattern with `pkg/awsrouter`;
 [docs/reference.md](docs/reference.md#pkgawsrouter) has the worked example.
 
 ## Documentation

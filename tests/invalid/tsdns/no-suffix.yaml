@@ -1,3 +1,0 @@
-# The chart is meaningless without the zone it answers for.
-clusterIP: 172.20.0.53
-resolverIP: 172.20.0.10

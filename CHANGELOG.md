@@ -2,8 +2,23 @@
 
 What changed for a consumer, per version, newest first. A version with no
 heading here is a patch cut automatically for dependency bumps alone; its
-GitHub Release lists them. Both charts and the Go module are released
+GitHub Release lists them. The chart and the Go module are released
 together at every version.
+
+## v1.14.0
+
+- **BREAKING: the `tsdns` chart and its CoreDNS image are removed.**
+  Split-DNS mechanism now lives entirely in `pkg/tailnet.NewSplitDNS`,
+  which is unchanged: point it at a resolver of your own instead of at a
+  `tsdns` ClusterIP (see the [README](README.md#the-model)). tsdns's only
+  consumer stopped using it on 2026-09-05, and its last change was
+  2026-09-04. **v1.13.0 is the last version that shipped the `tsdns`
+  chart and image**; that version, and every earlier one, remains
+  published at `oci://ghcr.io/truvity/charts/tsdns` and is unaffected by
+  this removal. `docs/reference.md`, `docs/doctrine.md` and
+  `docs/safety.md` drop their `tsdns` sections; see
+  [docs/adoption.md](docs/adoption.md#upgrading) for what an upgrade
+  changes.
 
 ## v1.13.0
 

@@ -1,9 +1,9 @@
 # Reference
 
-Every value of both charts and every input and output of the Go packages.
-For the charts, `charts/<chart>/values.yaml` carries the same keys with their
-defaults, and `values.schema.json` is the authority on types: an unknown key
-fails the render. For the Go packages, the package documentation
+Every value of the chart and every input and output of the Go packages.
+For the chart, `charts/tailscaled/values.yaml` carries the same keys with
+their defaults, and `values.schema.json` is the authority on types: an
+unknown key fails the render. For the Go packages, the package documentation
 (`go doc github.com/truvity/tailscale/pkg/<name>`) is the authority.
 
 ## tailscaled
@@ -42,39 +42,6 @@ always carries `--accept-dns=false`.
 
 The pod runs as UID/GID 65532, non-root, with the `RuntimeDefault` seccomp
 profile, every capability dropped and no privilege escalation.
-
-## tsdns
-
-A split-DNS gateway: a ConfigMap with the Corefile, a Deployment of CoreDNS
-and a ClusterIP Service, all named `tsdns`, in the release namespace. A
-Corefile change rolls the pods (`checksum/corefile` annotation).
-
-| Value | Default | Notes |
-|---|---|---|
-| `suffix` | *required* | the tailnet-only name space, e.g. `cluster.example`; `*.svc.<suffix>` is rewritten to `*.svc.<clusterDomain>` and forwarded to `resolverIP` |
-| `clusterIP` | *required* | the Service's address, pinned inside the Service CIDR; the tailnet's split-DNS entry names it |
-| `resolverIP` | *required* | the in-cluster resolver the suffix (and, with `catchAll`, everything else) is forwarded to |
-| `clusterDomain` | `cluster.local` | the rewrite target |
-| `forwardZones` | `[]` | `[{zone, resolver}]`, both required: zones the gateway can resolve but tailnet clients cannot, such as a cloud provider's private endpoint zone |
-| `catchAll` | `false` | `true` adds a `.` block forwarding every other name to `resolverIP`, so a pod can use tsdns as its only nameserver; off, names outside the declared zones are refused |
-| `debugLog` | `false` | per-query logging in every block, tagged `suffix-block`, `forwardzone-block` or `catchall-block`, with the rcode and the response flags; a log line per query |
-| `replicas` | `2` | integer, `0` or more |
-| `image.repository` | `registry.k8s.io/coredns/coredns` | point it at a pull-through cache if the gateway must not depend on the internet |
-| `image.tag` | the pinned CoreDNS release (`values.yaml`) | |
-| `image.pullPolicy` | `IfNotPresent` | `Always`, `IfNotPresent` or `Never` |
-| `podAnnotations`, `podLabels` | `{}` | string values |
-| `priorityClassName` | `""` | |
-| `nodeSelector` | `{}` | |
-| `tolerations` | `[]` | |
-| `affinity` | `{}` | |
-| `topologySpreadConstraints` | one, across `kubernetes.io/hostname`, `ScheduleAnyway` | replaced, not merged, when set |
-| `resources` | requests `cpu: 20m`, `memory: 32Mi`; limit `memory: 128Mi` | |
-| `global` | — | accepted and ignored |
-
-Every block answers `errors` and caches for 30 seconds. The suffix block also
-serves `health` on `:8080` (liveness), `ready` on `:8181` (readiness) and
-`prometheus` on `:9153` (container port `metrics`). The container keeps only
-`NET_BIND_SERVICE` and runs with a read-only root filesystem.
 
 ## pkg/acl
 

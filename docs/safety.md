@@ -22,20 +22,6 @@ renders each one and fails if any of them renders.
 | an empty `serviceAccount.name` | `service-account-name-empty.yaml` | a ServiceAccount the API server refuses after the rest has applied |
 | a negative `replicaCount` | `replicas-negative.yaml` | a Deployment the API server refuses |
 
-### tsdns
-
-| Refusal | Fixture | What it prevents |
-|---|---|---|
-| no `suffix` | `no-suffix.yaml` | a gateway with no zone to answer for |
-| no `clusterIP` | `no-cluster-ip.yaml` | an allocated address that the split-DNS entry, written elsewhere, does not name |
-| no `resolverIP` | `no-resolver-ip.yaml` | a suffix block with nowhere to forward to |
-| a `forwardZones` entry without a `resolver` | `forward-zone-no-resolver.yaml` | a server block CoreDNS will not load |
-| an unknown key in a `forwardZones` entry | `forward-zone-unknown-key.yaml` | `port: 53` silently ignored |
-| any unknown top-level key | `unknown-key.yaml` | `catchall: true` read as `catchAll: false` |
-
-The three required values are refused twice, by the schema and by `required`
-in the templates, so a render that skips schema validation still fails.
-
 ## Refused before anything is created
 
 ### pkg/awsrouter
@@ -102,31 +88,6 @@ Each replica joins as a new node and writes no state back to a Secret, so the
 pod needs no RBAC and two replicas never fight over one identity. The cost is
 that every restart is a new node, which is why the policy must auto-approve
 every route the router advertises (below).
-
-### tsdns: a pinned address and a suffix that is not the cluster domain
-
-The split-DNS entry is written in the tailnet, out of band, so the Service
-address must not be whatever the allocator hands out. The suffix is not the
-cluster domain, so the names resolve only over the tailnet and two clusters'
-names never collide.
-
-### tsdns: refuse by default, `catchAll` on request
-
-Off, the gateway answers its declared zones and refuses everything else. A pod
-that needs the tailnet suffix cannot get it by adding tsdns as a *second*
-nameserver: a stub resolver takes the first server's NXDOMAIN as final, and
-musl asks every server at once and takes the fastest answer. So `catchAll`
-lets a pod use tsdns as its *only* nameserver (`dnsPolicy: None`). The pod
-then depends on tsdns for all resolution, which is why it is a choice and
-not the default.
-
-### tsdns: `debugLog` to tell one NXDOMAIN from another
-
-A gateway returning NXDOMAIN for a name in its own suffix looks the same from
-outside whether the rewrite did not fire or the upstream had no answer, and
-`errors` logs neither: NXDOMAIN is an answer, not an error. `debugLog` tags
-every query with the server block that answered. It costs a line per query:
-turn it on to diagnose, and off again.
 
 ### pkg/acl: every advertised route auto-approved for its router's tag
 
@@ -374,10 +335,3 @@ keeps "remove that one file" a complete rollback.
 `image.tag` defaults to `stable`, so the same render can run a newer
 `tailscaled` after a pod restart, and the zero-diff gate cannot see it. Pin a
 version where the render must say what runs.
-
-### A name resolves only where its address is reachable
-
-tsdns listens on an address in the Service CIDR, and the policy lets only
-`InClusterGroups` reach the Service CIDR. A person with the VPC tier alone
-gets no answer from tsdns, which would not help anyway: every name it answers
-for is a Service address they cannot reach.

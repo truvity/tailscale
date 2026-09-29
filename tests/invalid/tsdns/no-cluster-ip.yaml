@@ -1,3 +1,0 @@
-# The Service address is what clients are pointed at; it must be pinned.
-suffix: cluster.example
-resolverIP: 172.20.0.10

@@ -27,12 +27,12 @@
 4. **The routers.** `charts/tailscaled` in each cluster, `pkg/awsrouter` for
    each network. Their routes are approved on arrival because step 1
    auto-approved them for the routers' tags.
-5. **The names.** `charts/tsdns` with a pinned `clusterIP`, then
-   `tailnet.NewSplitDNS` for the suffix to that address.
+5. **The names.** `tailnet.NewSplitDNS` for the suffix, pointed at a
+   resolver of your own.
 6. Optionally, `tailnet.NewS3FlowLogs`.
 
-Pin both charts and the Go module at **the same version**: one tag releases
-them all.
+Pin the chart and the Go module at **the same version**: one tag releases
+them both.
 
 ## The zero-diff gate
 
@@ -57,13 +57,11 @@ Tightening a default is a separate change, adopted on its own evidence.
 Moving hand-written objects or an existing Pulumi program onto these
 components is one change whose render or preview diff is empty.
 
-**The charts.** tailscaled's Deployment is `tailscaled` and its ServiceAccount
-is `serviceAccount.name`; tsdns's ConfigMap, Deployment and Service are all
-`tsdns`. Both select on `app.kubernetes.io/name`. A Deployment whose selector
-differs cannot be updated in place (a selector is immutable), so an existing
-router or gateway with other names or labels is replaced, not adopted: for
-tailscaled that is a new ephemeral node and a brief loss of its routes; for
-tsdns, keep the `clusterIP` the split-DNS entry names.
+**The chart.** tailscaled's Deployment is `tailscaled` and its ServiceAccount
+is `serviceAccount.name`, both selecting on `app.kubernetes.io/name`. A
+Deployment whose selector differs cannot be updated in place (a selector is
+immutable), so an existing router with other names or labels is replaced,
+not adopted: a new ephemeral node and a brief loss of its routes.
 
 **The policy.** `NewACL` overwrites the live policy on its first apply.
 Render `acl.Build` and compare it with the live policy as JSON (not text)
@@ -85,11 +83,12 @@ group must keep the description the module writes, or AWS replaces it.
 
 ## Upgrading
 
-Only v1.11.0 has been marked **Breaking** so far. What each one changes in a
+v1.14.0 and v1.11.0 are marked **Breaking**. What each one changes in a
 render or a preview:
 
 | Version | What you will see |
 |---|---|
+| v1.14.0 | **Breaking**: `charts/tsdns` and its CoreDNS image are removed — the DNS gateway a chart shipped. The last version that shipped them is v1.13.0. `pkg/tailnet.NewSplitDNS` is unchanged: point it at a resolver of your own (see the [README](../README.md#the-model)) |
 | v1.11.0 | **Breaking**: `pkg/awsrouter`'s `TailscaleInstanceConfig` gains a required `RouterSetupVersion` ("X.Y.Z", no leading "v") — `CreateTailscaleInstance` returns an error without it. Set it to the version your `go.mod` pins (normally 1.11.0, right after this bump). Every router's user data changes shape (the bootstrap split — see CHANGELOG.md and safety.md), so every router is replaced once, but a router with neither `TrustedUserCAKeys`/`AuthorizedPrincipals` nor `OPKSSH` set ends up in the same effective configuration as before (`router_setup_test.go` proves this). `OPKSSH.InstallScriptURL`/`InstallScriptSHA256` are removed (opkssh's own upstream install script is no longer used); every other `OPKSSH` field is unchanged, and opkssh now installs correctly on Amazon Linux 2023 |
 | v1.10.0 | `pkg/awsrouter`: optional `OPKSSH`, additive to `TrustedUserCAKeys`/`AuthorizedPrincipals`. Unset (or `Enabled: false`), the user data is byte-for-byte as in 1.9.0 and no router is replaced. Setting it is a new launch-template version and a refresh |
 | v1.7.1 | `pkg/awsrouter`: the preview deletes the role's attachment of `AmazonSSMManagedInstanceCore`, and the user data changes (the join log goes to the serial console), so the launch template gets a new version and the instance refresh replaces every router once. No input changed. Anything outside this module that relied on the router role holding that managed policy — Session Manager, Systems Manager inventory or patching — loses it; routers were never reachable through Session Manager, and access is now SSH with a certificate or nothing ([safety.md](safety.md#routers-access-diagnosis-and-break-glass)) |
