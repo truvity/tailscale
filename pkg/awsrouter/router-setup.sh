@@ -4,8 +4,9 @@
 # size-capped journald, sshd hardening, the tailnet repo and
 # join unit, optional SSH user-certificate login (ssh.go), optional
 # opkssh OIDC sign-in (opkssh.go) — either of which gets the SSH login
-# lockdown — and optional SSH host-certificate renewal via
-# truvity/openbao's cmd/openbao-hostcert (hostcert.go).
+# lockdown — and optional SSH host certificates via truvity/openbao's
+# cmd/openbao-hostcert (hostcert.go): signed once as soon as the router
+# is on the tailnet, then renewed by a timer.
 #
 # GENERIC and VERSION-PINNED. Every router — any environment, any
 # tailnet, with or without the optional features — downloads this SAME
@@ -310,6 +311,18 @@ else
 fi
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') tailscale-join boot pass (marker: \$([ -f \$MARKER ] && echo present || echo absent))"
 
+# The SSH host certificate, signed NOW (hostcert.go): after the router
+# is on the tailnet (the certificate's principal is its tailnet name)
+# and BEFORE the lifecycle action completes, so a router is InService
+# already presenting a CA-signed host key, instead of only its plain one
+# until openbao-hostcert.timer first fires 5-15 minutes after boot.
+# Bounded and fail-safe: openbao-hostcert-boot.sh always exits 0 within
+# a few minutes, and a router without HOST_CERT has no such script.
+sign_host_cert() {
+  [ -x /usr/local/sbin/openbao-hostcert-boot.sh ] || return 0
+  /usr/local/sbin/openbao-hostcert-boot.sh || true
+}
+
 complete_hook() {
   TOKEN=\$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
   INSTANCE_ID=\$(curl -s -H "X-aws-ec2-metadata-token: \$TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
@@ -327,6 +340,7 @@ if [ -f "\$MARKER" ]; then
   # Already joined (e.g. during warm-pool entry) — tailscaled reconnects
   # from persisted state; just complete any pending lifecycle action.
   systemctl is-active -q tailscaled || systemctl enable --now tailscaled || true
+  sign_host_cert
   complete_hook
   echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') hook pass done (already joined)"
   exit 0
@@ -340,6 +354,7 @@ for attempt in \$(seq 1 20); do
     systemctl is-active -q tailscaled || systemctl enable --now tailscaled
     AUTH_KEY=\$(aws ssm get-parameter --name $SSM_AUTH_KEY_PATH --with-decryption --query Parameter.Value --output text --region $REGION) || AUTH_KEY=""
     if [ -n "\$AUTH_KEY" ] && tailscale up --authkey "\$AUTH_KEY" --advertise-routes=$ADVERTISE_ROUTES --accept-dns=false; then
+      sign_host_cert
       complete_hook
       touch "\$MARKER"
       echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') joined + hook completed"
@@ -487,11 +502,13 @@ EOF
   fi
 }
 
-# ── SSH host-certificate renewal (hostcert.go) — additive, sshd keeps ──
+# ── SSH host certificates (hostcert.go) — additive, sshd keeps ─────────
 # serving the plain host key either way
 #
 # truvity/openbao's cmd/openbao-hostcert does the actual OpenBAO login
-# and signing, on a timer; this function's only job is getting it
+# and signing: once as soon as the router is on the tailnet
+# (openbao-hostcert-boot.sh, called by tailscale-join.sh), then on a
+# timer; this function's only job is getting it
 # installed, configured and enabled, fail-closed the same way
 # setup_opkssh is: a bad checksum or a failing sshd -t leaves the
 # certificate path untouched and does not stop the router from working
@@ -582,6 +599,58 @@ fi
 exec /usr/local/bin/openbao-hostcert --principal "$PRINCIPAL"
 EOF
   chmod 0755 "$ROOT/usr/local/sbin/openbao-hostcert-run.sh"
+
+  # The first certificate, signed at boot rather than on the timer's
+  # first tick (OnBootSec=5min plus up to 10 minutes of jitter, during
+  # which a client that trusts routers by @cert-authority alone refuses
+  # this one). tailscale-join.sh runs it right after `tailscale up`
+  # (openbao-hostcert-run.sh needs the tailnet name, which does not
+  # exist before the join) and before it completes the lifecycle action.
+  # It runs the wrapper directly, not `systemctl start
+  # openbao-hostcert.service`: that unit is ordered after
+  # tailscale-join.service, so starting it from inside the join would
+  # wait on the join itself. Bounded (ATTEMPTS tries of TIMEOUT seconds,
+  # BACKOFF seconds more before each retry) and fail-safe: a failure is
+  # logged, sshd keeps its plain host key, the timer retries, and this
+  # script still exits 0, so it never fails or holds up the join.
+  cat >"$ROOT/usr/local/sbin/openbao-hostcert-boot.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+ENV_FILE=/etc/openbao-hostcert/hostcert.env
+DROP_IN=/etc/ssh/sshd_config.d/70-hostcert.conf
+RUN=/usr/local/sbin/openbao-hostcert-run.sh
+ATTEMPTS=3
+TIMEOUT=45
+BACKOFF=5
+log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') openbao-hostcert-boot: $*"; }
+# No drop-in: setup_hostcert rolled back (sshd -t failed), and sshd
+# would not serve a certificate anyway.
+if [ ! -f "$DROP_IN" ] || [ ! -r "$ENV_FILE" ]; then
+  log "skipped: the host certificate is not configured"
+  exit 0
+fi
+# The service's EnvironmentFile, read as systemd reads it: one
+# KEY=value per line, the value verbatim (the reload command has
+# spaces), never evaluated by a shell.
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    OPENBAO_HOSTCERT_*=*) export "${line%%=*}=${line#*=}" ;;
+  esac
+done <"$ENV_FILE"
+for attempt in $(seq 1 "$ATTEMPTS"); do
+  if timeout "$TIMEOUT" "$RUN"; then
+    log "host certificate signed at boot (attempt $attempt/$ATTEMPTS)"
+    exit 0
+  fi
+  log "attempt $attempt/$ATTEMPTS failed"
+  if [ "$attempt" -lt "$ATTEMPTS" ]; then
+    sleep $((attempt * BACKOFF))
+  fi
+done
+log "host certificate NOT signed at boot; sshd serves the plain host key until openbao-hostcert.timer renews it"
+exit 0
+EOF
+  chmod 0755 "$ROOT/usr/local/sbin/openbao-hostcert-boot.sh"
 
   # The systemd unit content lives here, not a second checksummed
   # download: two small, static files, reviewed the same way every

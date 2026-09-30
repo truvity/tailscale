@@ -5,6 +5,41 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.19.0
+
+- **`pkg/awsrouter`: a router's first SSH host certificate is signed at
+  boot, not on the renewal timer's first tick.** With `HostCert` set, a
+  fresh router served only its plain host key until
+  `openbao-hostcert.timer` first fired, 5 to 15 minutes after boot
+  (`OnBootSec=5min` plus up to 10 minutes of jitter), so a client that
+  trusts routers by `@cert-authority` alone refused it with "Host key
+  verification failed" after every instance replacement.
+  `router-setup.sh` now also writes `/usr/local/sbin/openbao-hostcert-boot.sh`,
+  and `tailscale-join.sh` runs it right after `tailscale up` and before it
+  completes the lifecycle action — on the first join, and on every later
+  boot (a warm-pool instance starting into service re-signs rather than
+  going InService on a certificate from before a long stop). The router
+  is InService already presenting a CA-signed host key.
+- The signing runs after the join, not earlier in `router-setup.sh`,
+  because the certificate's principal is the router's tailnet name, which
+  does not exist before `tailscale up`. It runs the service's own wrapper
+  (`openbao-hostcert-run.sh`, with the service's `hostcert.env`) directly,
+  not `systemctl start openbao-hostcert.service`: that unit is ordered
+  after `tailscale-join.service`, so starting it from inside the join
+  would wait on the join itself.
+- **Bounded and fail-safe.** At most 3 attempts of 45 seconds each, 5 and
+  10 seconds apart (under 3 minutes in all, against the lifecycle hook's
+  15-minute heartbeat). An unreachable OpenBAO, a refused login or sign,
+  or a hang is logged (`openbao-hostcert-boot: … NOT signed at boot`),
+  sshd keeps serving the plain host key, the timer retries on its own
+  schedule, and the script still exits 0: it never fails or holds up the
+  join, the lifecycle action or routing. Without `HostCert`, or when
+  `setup_hostcert` rolled back its sshd drop-in, nothing runs.
+- The timer is unchanged and still renews the certificate every 12 hours.
+- Every router's user data changes only in the pinned `router-setup.sh`
+  digest; the launch template gets a new version and the instance refresh
+  replaces every router.
+
 ## v1.18.0
 
 - **`pkg/awsrouter`: the image is Amazon's standard AL2023 arm64 image,

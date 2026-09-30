@@ -62,7 +62,14 @@ func (c TailscaleInstanceConfig) hostCertCABundleLines() []string {
 //     instance will get) and passes it as `--principal`, with no new
 //     package: AL2023 already has grep/sed, and `tailscale` is this
 //     package's own reason to exist;
-//   - adds `HostCertificate` to sshd's config and enables the timer.
+//   - adds `HostCertificate` to sshd's config and enables the timer;
+//   - writes openbao-hostcert-boot.sh, which tailscale-join.sh runs right
+//     after `tailscale up` and before it completes the lifecycle action,
+//     so the FIRST certificate is signed at boot rather than on the
+//     timer's first tick 5-15 minutes later (the principal is the
+//     tailnet name, so it cannot run before the join). Bounded and
+//     fail-safe: a failure is logged, sshd keeps its plain host key, the
+//     timer retries, and the join carries on.
 //
 // nil HostCert, or HostCert.Enabled false (the default): none of the
 // above runs, and the user data renders exactly as it did before this

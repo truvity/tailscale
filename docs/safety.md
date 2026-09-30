@@ -233,7 +233,11 @@ rendered and published; this package only carries the value through.)
 **Fail-safe either way.** A missed renewal, a refused login, a refused
 sign or a `--principal-pattern` refusal all leave whatever certificate
 (or none) was already on disk untouched — sshd keeps serving the plain
-host key, never a lockout. `router-setup.sh`'s own install of the
+host key, never a lockout. The first certificate is signed at boot
+(`openbao-hostcert-boot.sh`, run by the join right after `tailscale up`),
+under the same contract: bounded to 3 attempts of 45 seconds, and a
+failure is logged and exits 0, so it never fails the join, the lifecycle
+action or routing — the timer retries. `router-setup.sh`'s own install of the
 binary, units and sshd drop-in follows the identical fail-closed
 contract opkssh's install already does: a checksum mismatch or a
 failing `sshd -t` rolls back only the host-certificate drop-in, never

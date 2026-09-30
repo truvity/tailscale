@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -603,6 +604,249 @@ OPKSSH_SELINUX_SHA256="f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb95
 	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/60-opk-ssh.conf"))
 	assert.FileExists(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf"))
 	assert.FileExists(t, filepath.Join(root, "usr/local/bin/openbao-hostcert"))
+}
+
+// ── The first host certificate, signed at boot ─────────────────────────
+//
+// openbao-hostcert-boot.sh is the one-shot the join runs right after
+// `tailscale up`, so a router is InService already presenting a
+// CA-signed host key. These run the script router-setup.sh writes, for
+// real, with its absolute paths pointed at the harness's own root and
+// the signing wrapper replaced by a stub.
+
+// hostCertBoot installs HostCert through the harness, then writes the
+// boot script with its paths pointed into that root and RUN pointed at
+// a stub whose body is runBody. BACKOFF is 0 so a retry costs no time;
+// extra replacements (e.g. a shorter TIMEOUT) apply last. Returns the
+// script's path and the scratch directory the stub can write into.
+func hostCertBoot(t *testing.T, runBody string, extra ...string) (script, tmp, root string) {
+	t.Helper()
+
+	root, _ = routerSetupHarness(t, hostCertEnv(), nil, noopSystemFuncs)
+	tmp = t.TempDir()
+
+	run := filepath.Join(tmp, "run.sh")
+	require.NoError(t, os.WriteFile(run, []byte("#!/bin/bash\n"+runBody+"\n"), 0o755))
+
+	boot := mustRead(t, filepath.Join(root, "usr/local/sbin/openbao-hostcert-boot.sh"))
+
+	replacements := []string{
+		"ENV_FILE=/etc/openbao-hostcert/hostcert.env", "ENV_FILE=" + shellQuote(filepath.Join(root, "etc/openbao-hostcert/hostcert.env")),
+		"DROP_IN=/etc/ssh/sshd_config.d/70-hostcert.conf", "DROP_IN=" + shellQuote(filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf")),
+		"RUN=/usr/local/sbin/openbao-hostcert-run.sh", "RUN=" + shellQuote(run),
+		"BACKOFF=5", "BACKOFF=0",
+	}
+	replacements = append(replacements, extra...)
+
+	for i := 0; i < len(replacements); i += 2 {
+		require.Contains(t, boot, replacements[i], "the boot script lost the line a test points elsewhere")
+		boot = strings.ReplaceAll(boot, replacements[i], replacements[i+1])
+	}
+
+	script = filepath.Join(tmp, "openbao-hostcert-boot.sh")
+	require.NoError(t, os.WriteFile(script, []byte(boot), 0o755))
+
+	return script, tmp, root
+}
+
+func TestRouterSetupHostCertInstallsBootSigner(t *testing.T) {
+	root, _ := routerSetupHarness(t, hostCertEnv(), nil, noopSystemFuncs)
+
+	path := filepath.Join(root, "usr/local/sbin/openbao-hostcert-boot.sh")
+	boot := mustRead(t, path)
+	assert.Contains(t, boot, `timeout "$TIMEOUT" "$RUN"`, "every attempt is bounded")
+	assert.Contains(t, boot, "RUN=/usr/local/sbin/openbao-hostcert-run.sh", "the same wrapper the timer's service runs")
+	assert.NotContains(t, boot, "systemctl start openbao-hostcert", "the service is ordered after the join, which calls this")
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+
+	// The timer stays: the boot signing is the first certificate, the
+	// timer renews it.
+	assert.Contains(t, mustRead(t, filepath.Join(root, "calls.log")), "svc_enable_now openbao-hostcert.timer")
+}
+
+func TestHostCertBootSignsOnce(t *testing.T) {
+	script, tmp, _ := hostCertBoot(t, `echo run >> "$(dirname "$0")/runs"
+env | grep '^OPENBAO_HOSTCERT_' | sort > "$(dirname "$0")/env"
+exit 0`)
+
+	out, err := exec.Command("bash", script).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "host certificate signed at boot (attempt 1/3)")
+	assert.Equal(t, "run\n", mustRead(t, filepath.Join(tmp, "runs")))
+
+	// The service's EnvironmentFile reaches the wrapper exactly as
+	// systemd would pass it: values verbatim, spaces included.
+	env := mustRead(t, filepath.Join(tmp, "env"))
+	assert.Contains(t, env, "OPENBAO_HOSTCERT_ADDRESS=https://openbao.example.internal\n")
+	assert.Contains(t, env, "OPENBAO_HOSTCERT_RELOAD_CMD=systemctl reload sshd\n")
+	assert.Contains(t, env, "OPENBAO_HOSTCERT_PRINCIPAL_PATTERNS=ip-10-0-*.tailnet.example.ts.net\n")
+}
+
+func TestHostCertBootRetriesThenSigns(t *testing.T) {
+	script, tmp, _ := hostCertBoot(t, `echo run >> "$(dirname "$0")/runs"
+[ "$(wc -l < "$(dirname "$0")/runs")" -ge 3 ]`)
+
+	out, err := exec.Command("bash", script).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "attempt 1/3 failed")
+	assert.Contains(t, string(out), "attempt 2/3 failed")
+	assert.Contains(t, string(out), "host certificate signed at boot (attempt 3/3)")
+	assert.Equal(t, "run\nrun\nrun\n", mustRead(t, filepath.Join(tmp, "runs")))
+}
+
+// OpenBAO unreachable, a refused login or sign: every attempt fails, and
+// the script still exits 0, so the join carries on to the lifecycle
+// action with sshd serving the plain host key.
+func TestHostCertBootFailureIsNotFatal(t *testing.T) {
+	script, tmp, _ := hostCertBoot(t, `echo run >> "$(dirname "$0")/runs"
+echo "error: openbao unreachable" >&2
+exit 1`)
+
+	out, err := exec.Command("bash", script).CombinedOutput()
+	require.NoError(t, err, "a failed signing must never fail its caller:\n%s", string(out))
+	assert.Contains(t, string(out), "attempt 3/3 failed")
+	assert.Contains(t, string(out), "host certificate NOT signed at boot")
+	assert.Equal(t, "run\nrun\nrun\n", mustRead(t, filepath.Join(tmp, "runs")))
+}
+
+// A hung OpenBAO call is cut off by the per-attempt timeout: the whole
+// script ends in about ATTEMPTS x TIMEOUT, never waits on the hang.
+func TestHostCertBootIsBounded(t *testing.T) {
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("timeout not installed")
+	}
+
+	script, _, _ := hostCertBoot(t, `exec sleep 60`, "TIMEOUT=45", "TIMEOUT=1")
+
+	start := time.Now()
+	out, err := exec.Command("bash", script).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Less(t, time.Since(start), 20*time.Second)
+	assert.Contains(t, string(out), "host certificate NOT signed at boot")
+}
+
+// No sshd drop-in (setup_hostcert rolled back on a failing sshd -t):
+// nothing to sign for, and nothing runs.
+func TestHostCertBootSkipsWithoutDropIn(t *testing.T) {
+	script, tmp, root := hostCertBoot(t, `echo run >> "$(dirname "$0")/runs"`)
+	require.NoError(t, os.Remove(filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf")))
+
+	out, err := exec.Command("bash", script).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "skipped: the host certificate is not configured")
+	mustNotExist(t, filepath.Join(tmp, "runs"))
+}
+
+// ── The join signs before it completes the lifecycle action ────────────
+
+// runJoin runs the join script router-setup.sh writes, for real, with
+// its absolute paths pointed into a temp dir and tailscale, aws, curl
+// and systemctl stubbed on PATH (each appends its argv to calls). The
+// boot signer is a stub with body signBody, or absent when signBody is
+// empty — a router without HOST_CERT. Returns the output and the calls.
+func runJoin(t *testing.T, marker bool, signBody string) (output, calls string) {
+	t.Helper()
+
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed")
+	}
+
+	root, _ := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs)
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "bin")
+	require.NoError(t, os.MkdirAll(bin, 0o755))
+
+	log := filepath.Join(tmp, "calls")
+	stub := func(name, body string) {
+		require.NoError(t, os.WriteFile(filepath.Join(bin, name),
+			[]byte("#!/bin/bash\necho \""+name+" $*\" >> "+shellQuote(log)+"\n"+body+"\n"), 0o755))
+	}
+	stub("tailscale", "exit 0")
+	stub("systemctl", "exit 0")
+	stub("curl", "echo stub")
+	stub("aws", `[ "$1" = ssm ] && echo tskey-stub; exit 0`)
+
+	signer := filepath.Join(tmp, "openbao-hostcert-boot.sh")
+	if signBody != "" {
+		require.NoError(t, os.WriteFile(signer,
+			[]byte("#!/bin/bash\necho \"sign\" >> "+shellQuote(log)+"\n"+signBody+"\n"), 0o755))
+	}
+
+	markerPath := filepath.Join(tmp, "marker")
+	if marker {
+		require.NoError(t, os.WriteFile(markerPath, nil, 0o644))
+	}
+
+	join := mustRead(t, filepath.Join(root, "usr/local/sbin/tailscale-join.sh"))
+	for _, r := range [][2]string{
+		{"LOCK=/run/tailscale-join.lock", "LOCK=" + shellQuote(filepath.Join(tmp, "join.lock"))},
+		{"MARKER=/var/lib/tailscale-join.done", "MARKER=" + shellQuote(markerPath)},
+		{"/var/log/tailscale-join.log", filepath.Join(tmp, "join.log")},
+		{"/usr/local/sbin/openbao-hostcert-boot.sh", signer},
+	} {
+		require.Contains(t, join, r[0])
+		join = strings.ReplaceAll(join, r[0], r[1])
+	}
+
+	script := filepath.Join(tmp, "tailscale-join.sh")
+	require.NoError(t, os.WriteFile(script, []byte(join), 0o755))
+
+	cmd := exec.Command("bash", script)
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	return string(out), mustRead(t, log)
+}
+
+// assertOrder checks each of want appears in calls, in that order.
+func assertOrder(t *testing.T, calls string, want ...string) {
+	t.Helper()
+
+	at := -1
+	for _, w := range want {
+		i := strings.Index(calls, w)
+		require.GreaterOrEqual(t, i, 0, "%q never happened:\n%s", w, calls)
+		assert.Greater(t, i, at, "%q happened out of order:\n%s", w, calls)
+		at = i
+	}
+}
+
+func TestJoinScriptSignsHostCertBeforeCompletingHook(t *testing.T) {
+	t.Run("first join", func(t *testing.T) {
+		out, calls := runJoin(t, false, "exit 0")
+		assert.Contains(t, out, "joined + hook completed")
+		assertOrder(t, calls, "tailscale up", "sign", "aws autoscaling complete-lifecycle-action")
+	})
+
+	// A warm-pool instance joined at warm-pool entry; starting into
+	// service re-signs, so it is never InService on an expired
+	// certificate from a long stop.
+	t.Run("already joined", func(t *testing.T) {
+		out, calls := runJoin(t, true, "exit 0")
+		assert.Contains(t, out, "hook pass done (already joined)")
+		assert.NotContains(t, calls, "tailscale up")
+		assertOrder(t, calls, "sign", "aws autoscaling complete-lifecycle-action")
+	})
+}
+
+// The signer exiting non-zero (it never should) still never stops the
+// join: the lifecycle action completes and the marker is written.
+func TestJoinScriptContinuesWhenSigningFails(t *testing.T) {
+	out, calls := runJoin(t, false, "exit 1")
+	assert.Contains(t, out, "joined + hook completed")
+	assertOrder(t, calls, "tailscale up", "sign", "aws autoscaling complete-lifecycle-action")
+}
+
+// No HOST_CERT: no signer on disk, and the join is what it always was.
+func TestJoinScriptWithoutHostCert(t *testing.T) {
+	out, calls := runJoin(t, false, "")
+	assert.Contains(t, out, "joined + hook completed")
+	assert.NotContains(t, calls, "sign")
+	assertOrder(t, calls, "tailscale up", "aws autoscaling complete-lifecycle-action")
 }
 
 // ── Swap: only when the disk has room, never a failed setup ────────────
