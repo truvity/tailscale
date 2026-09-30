@@ -357,9 +357,12 @@ optional features:
   start at once, the second logs `another pass holds the lock` and leaves
   the join to the first): installs Tailscale from its signed repository, reads the key
   from `SSMAuthKeyPath`, runs
-  `tailscale up --advertise-routes=… --accept-dns=false`, turns off the
+  `tailscale up --advertise-routes=… --accept-dns=false`, signs the first
+  SSH host certificate when `HOST_CERT=true` (below), turns off the
   source/destination check and completes the lifecycle action — retrying 20
-  times, 15 seconds apart. Its output goes to `/var/log/tailscale-join.log`
+  times, 15 seconds apart. On a later boot (already joined, e.g. a warm-pool
+  instance starting into service) it signs again, then completes the
+  lifecycle action. Its output goes to `/var/log/tailscale-join.log`
   and to the serial console;
 - when `SSH_USER_CA=true` or `OPKSSH=true` — either login path, or both:
   the SSH login lockdown, `/etc/ssh/sshd_config.d/10-ssh-login.conf`
@@ -414,8 +417,18 @@ optional features:
   `/etc/ssh/sshd_config.d/70-hostcert.conf` (`HostCertificate
   /etc/ssh/ssh_host_ed25519_key-cert.pub`), runs `sshd -t`, and on success
   enables the timer — on failure, removes only this drop-in, the same
-  rollback contract opkssh's own failure takes. The timer fires ~5 minutes
-  after boot, then every 12 hours with up to 10 minutes of jitter; see
+  rollback contract opkssh's own failure takes. The first certificate does
+  not wait for the timer: `/usr/local/sbin/openbao-hostcert-boot.sh`, which
+  `tailscale-join.sh` runs right after `tailscale up` and before the
+  lifecycle action completes, runs the same wrapper with the service's
+  `hostcert.env` (directly, not through `systemctl start`: the service is
+  ordered after the join), so a router is InService already presenting a
+  CA-signed host key. It is bounded (3 attempts of 45 seconds, 5 and 10
+  seconds apart) and fail-safe: a failure logs
+  `openbao-hostcert-boot: … NOT signed at boot`, sshd keeps its plain host
+  key, and the script exits 0, never failing or holding up the join. The
+  timer then renews: ~5 minutes after boot, then every 12 hours with up to
+  10 minutes of jitter; see
   [safety.md](safety.md#host-certificate-renewal-the-principal-pattern-is-the-real-boundary)
   for why `PrincipalPatterns` — not this package, not the OpenBAO role —
   is what actually stops a certificate from being trusted for the wrong
