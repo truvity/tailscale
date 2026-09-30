@@ -125,9 +125,10 @@ type (
 )
 
 // hostCertArch is the one GOARCH this package ever deploys — AL2023
-// ARM64, router.go's LookupAmi filter ("al2023-ami-*-arm64") admits
-// nothing else. A future architecture needs a new entry here AND a new
-// LookupAmi filter, never one without the other.
+// ARM64: router.go's LookupAmi filters on this very architecture (and
+// ImageConfig's name filter ends "-arm64"), so it admits nothing else.
+// A future architecture needs a new entry here AND a new name filter,
+// never one without the other.
 const hostCertArch = "arm64"
 
 // principalPatternPattern is opksshTokenPattern's same conservative

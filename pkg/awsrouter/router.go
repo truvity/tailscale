@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"text/template"
 
@@ -71,10 +72,11 @@ const (
 	// primaryInterface is the primary network interface on AL2023 EC2 instances.
 	primaryInterface = "ens5"
 
-	// DefaultRootVolumeSizeGiB is RootVolumeConfig.SizeGiB's default.
-	// The image lookup can resolve to an AL2023 "minimal" image, whose
-	// own root volume is 2 GiB — too small for the packages, a swap file
-	// and the journal. 8 GiB is also the standard image's own size.
+	// DefaultRootVolumeSizeGiB is RootVolumeConfig.SizeGiB's default,
+	// the standard AL2023 image's own size. Before v1.18.0 the image
+	// lookup could resolve to an AL2023 "minimal" image, whose own root
+	// volume is 2 GiB — too small for the packages, a swap file and the
+	// journal; the explicit size keeps the disk independent of the image.
 	DefaultRootVolumeSizeGiB = 8
 	// MinRootVolumeSizeGiB is the smallest RootVolumeConfig.SizeGiB
 	// accepted: the standard AL2023 image's snapshot is 8 GiB, and EC2
@@ -82,7 +84,18 @@ const (
 	MinRootVolumeSizeGiB = 8
 	// DefaultRootVolumeType is RootVolumeConfig.Type's default.
 	DefaultRootVolumeType = "gp3"
+
+	// DefaultImageKernel is ImageConfig.Kernel's default: the kernel
+	// line Amazon's own "kernel-default" AL2023 arm64 image carried when
+	// this default was set. Amazon publishes every kernel line at the
+	// same instant, so an unpinned lookup would pick among them at random.
+	DefaultImageKernel = "6.18"
 )
+
+// imageKernelPattern is the shape ImageConfig.Kernel accepts: a
+// "<major>.<minor>" kernel line, digits and one dot, so the name filter
+// it lands in carries no wildcard of the caller's.
+var imageKernelPattern = regexp.MustCompile(`^[0-9]{1,3}\.[0-9]{1,3}$`)
 
 // rootVolumeTypes are the EBS volume types RootVolumeConfig.Type
 // accepts: the general-purpose SSD types. A router needs no
@@ -161,6 +174,23 @@ type (
 		// volume is always encrypted (with the account's default EBS
 		// key) and deleted with the instance.
 		RootVolume RootVolumeConfig
+
+		// Image selects the router's Amazon Linux 2023 image. The zero
+		// value is the newest standard (never minimal) arm64 image on
+		// the DefaultImageKernel kernel line.
+		Image ImageConfig
+	}
+
+	// ImageConfig selects the router's image within one family: Amazon's
+	// standard Amazon Linux 2023 arm64 images (owner "amazon", name
+	// "al2023-ami-2023.<release>-kernel-<Kernel>-arm64"). The minimal
+	// images ("al2023-ami-minimal-…") lack the AWS CLI the join needs and
+	// are never a match; neither are the ECS-optimized ones.
+	ImageConfig struct {
+		// Kernel is the AL2023 kernel line, "<major>.<minor>" (e.g.
+		// "6.12"). Empty means DefaultImageKernel. A kernel line Amazon
+		// does not publish fails the lookup at preview.
+		Kernel string
 	}
 
 	// RootVolumeConfig is the router's root EBS volume, on the image's
@@ -278,6 +308,34 @@ func rootBlockDevice(deviceName string, v RootVolumeConfig) (ec2.LaunchTemplateB
 	}, nil
 }
 
+// kernel is Kernel with its default applied.
+func (i ImageConfig) kernel() string {
+	if i.Kernel == "" {
+		return DefaultImageKernel
+	}
+
+	return i.Kernel
+}
+
+// nameFilter is the EC2 image name filter: the standard AL2023 family
+// only. "al2023-ami-2023." is the standard images' own prefix — the
+// minimal ("al2023-ami-minimal-…") and ECS ("al2023-ami-ecs-…") images
+// never start with it — and the kernel suffix pins one kernel line.
+func (i ImageConfig) nameFilter() string {
+	return fmt.Sprintf("al2023-ami-2023.*-kernel-%s-arm64", i.kernel())
+}
+
+// validate refuses a kernel line that is not "<major>.<minor>": the
+// value lands inside an EC2 name filter, where a "*" would widen the
+// family again.
+func (i ImageConfig) validate() error {
+	if i.Kernel != "" && !imageKernelPattern.MatchString(i.Kernel) {
+		return fmt.Errorf("awsrouter: Image.Kernel %q is not a <major>.<minor> kernel line", i.Kernel)
+	}
+
+	return nil
+}
+
 // baseName is the AWS-visible name stem. These live in one shared AWS
 // account namespace — two tailnets' fleets in the same VPC cannot both
 // own the security group "<environment>-tailscale" — so every fleet is
@@ -313,6 +371,10 @@ func CreateTailscaleInstance(
 	}
 
 	if err := config.RootVolume.validate(); err != nil {
+		return nil, err
+	}
+
+	if err := config.Image.validate(); err != nil {
 		return nil, err
 	}
 
@@ -591,16 +653,15 @@ func createTailscaleLaunchTemplate(
 ) (*ec2.LaunchTemplate, error) {
 	env := config.Environment
 
-	// Look up latest Amazon Linux 2023 ARM64 AMI.
-	// The pattern also matches the al2023-ami-minimal-* images (and
-	// resolves to one whenever a minimal image was published last — see
-	// docs/safety.md), whose own root volume is 2 GiB; the explicit root
-	// volume below makes the disk size independent of which one wins.
+	// Look up the newest standard Amazon Linux 2023 ARM64 AMI on one
+	// kernel line (see ImageConfig): never a minimal image, which lacks
+	// the AWS CLI the join needs.
 	ami, err := ec2.LookupAmi(c, &ec2.LookupAmiArgs{
 		Owners:     []string{"amazon"},
 		MostRecent: pulumi.BoolRef(true),
 		Filters: []ec2.GetAmiFilter{
-			{Name: "name", Values: []string{"al2023-ami-*-arm64"}},
+			{Name: "name", Values: []string{config.Image.nameFilter()}},
+			{Name: "architecture", Values: []string{hostCertArch}},
 			{Name: "state", Values: []string{"available"}},
 		},
 	}, pulumi.Provider(awsProvider))
