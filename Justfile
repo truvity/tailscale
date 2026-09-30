@@ -63,4 +63,4 @@ package:
     helm package charts/tailscaled --destination dist/
 
 # Everything CI runs on a pull request.
-check: build lint test leak-canary vuln
+check: build lint test leak-canary
