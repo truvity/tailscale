@@ -244,22 +244,26 @@ the router's other SSH paths.
 ### The image follows the newest match
 
 The launch template's image is looked up on every preview and update (owner
-`amazon`, name `al2023-ami-*-arm64`, most recent), so routers follow one image
-family chosen in code. A newer image means a new launch-template version, and
-the instance refresh then replaces every router, one after another, at the
-next update. An update that was meant to change nothing can therefore roll
-the fleet; read the preview for the launch template's image. A change of
-family is a code change, and it replaces every router the same way.
+`amazon`, architecture `arm64`, name `al2023-ami-2023.*-kernel-<Kernel>-arm64`,
+most recent), so routers follow one image family and one kernel line. A newer
+image in that family means a new launch-template version, and the instance
+refresh then replaces every router, one after another, at the next update. An
+update that was meant to change nothing can therefore roll the fleet; read the
+preview for the launch template's image. A change of kernel line
+(`Image.Kernel`) or of family is a deliberate change, and it replaces every
+router the same way.
 
-**Known issue:** the name pattern matches more than the standard image. It
-also matches Amazon's `minimal` images and every kernel line
-(`…-kernel-6.1-arm64`, `…-kernel-6.12-arm64`, and newer), and "most recent"
-picks whichever was published last, which can be a minimal image. The code's
-own comment excludes minimal images because the join needs the AWS CLI. Until
-the pattern is narrowed, check which image a preview resolves to before
-applying it. A minimal image's own root volume is 2 GiB; since v1.17.0 the
-launch template sets the root volume explicitly (`RootVolume`, 8 GiB by
-default), so the disk no longer depends on which family won.
+Before v1.18.0 the name pattern was `al2023-ami-*-arm64`. It also matched
+Amazon's `minimal` images (no AWS CLI, which the join needs; a 2 GiB root
+volume), the ECS-optimized images and every kernel line, and "most recent"
+picked whichever was published last: routers rolled onto a minimal image.
+Amazon publishes every kernel line of a release at the same instant, so even
+among standard images the pick was arbitrary. The pattern now starts with the
+standard images' own prefix, `al2023-ami-2023.`, which no minimal or ECS image
+carries, and ends with one kernel line (`DefaultImageKernel`, 6.18, unless
+`Image.Kernel` says otherwise). A kernel line Amazon stops publishing fails
+the lookup at preview, never silently falls back to another family. The root
+volume stays explicit (`RootVolume`, 8 GiB by default, since v1.17.0).
 
 ### Rotating the router SSH CA
 

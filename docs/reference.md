@@ -244,6 +244,7 @@ func routerFleet(
 | `HostCert` | `nil` (off) | optional SSH host-certificate renewal via [truvity/openbao](https://github.com/truvity/openbao)'s `cmd/openbao-hostcert`, additive to everything above — see `HostCertConfig` below |
 | `RouterSetupVersion` | *required* | `"X.Y.Z"` (no leading `v`) — the truvity/tailscale release the bootstrap downloads `router-setup.sh` from; normally the version this `go.mod` pins |
 | `RootVolume` | 8 GiB `gp3` | `RootVolumeConfig{SizeGiB, Type}`: the root EBS volume, on the image's own root device name, always encrypted (the account's default EBS key) and deleted with the instance. `SizeGiB` 0 is 8, otherwise at least 8 (the standard AL2023 image's own snapshot size); `Type` empty is `gp3`, otherwise `gp3` or `gp2` |
+| `Image` | kernel 6.18 | `ImageConfig{Kernel}`: the kernel line of the standard AL2023 arm64 image (see "The image lookup" below). `Kernel` empty is `DefaultImageKernel` (6.18), otherwise `<major>.<minor>`, such as `6.12`; a wildcard is refused. The family itself is not an input: never a minimal image |
 
 ### `OPKSSHConfig`
 
@@ -301,13 +302,17 @@ The result, `*TailscaleInstanceResult`, carries `SecurityGroupID`,
 ### The image lookup
 
 The launch template's image is resolved on every preview and update: owner
-`amazon`, name `al2023-ami-*-arm64`, state `available`, most recent. The
-family is fixed in code, not an input. When Amazon publishes a newer image
-that matches, the next update writes a new launch-template version, and the
+`amazon`, architecture `arm64`, name
+`al2023-ami-2023.*-kernel-<Image.Kernel>-arm64`, state `available`, most
+recent. That is Amazon's standard Amazon Linux 2023 image only: the minimal
+(`al2023-ami-minimal-…`) and ECS-optimized (`al2023-ami-ecs-…`) images never
+match. The family is fixed in code; the kernel line is `Image.Kernel`
+(default `DefaultImageKernel`, 6.18). When Amazon publishes a newer image that
+matches, the next update writes a new launch-template version, and the
 instance refresh replaces every router, one after another. Running routers
 between updates patch themselves (below). See
 [safety.md](safety.md#the-image-follows-the-newest-match) for what the name
-pattern also matches.
+pattern matched before v1.18.0.
 
 ### The user data: a small bootstrap, plus a downloaded script
 

@@ -5,6 +5,27 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.18.0
+
+- **`pkg/awsrouter`: the image is Amazon's standard AL2023 arm64 image,
+  never a minimal one.** The lookup's name filter `al2023-ami-*-arm64`
+  also matched `al2023-ami-minimal-*` (no AWS CLI, a 2 GiB root volume),
+  the ECS-optimized images and every kernel line, and "most recent" picked
+  whichever was published last — routers rolled onto a minimal image, and
+  the family could flip between rolls. The filter is now
+  `al2023-ami-2023.*-kernel-<kernel>-arm64` (the standard images' own
+  prefix, which no minimal or ECS image carries), plus `architecture=arm64`.
+  Amazon publishes all kernel lines of a release at the same instant, so
+  the kernel line is pinned too: a new input,
+  `TailscaleInstanceConfig.Image` (`ImageConfig{Kernel}`), defaults to
+  `DefaultImageKernel`, 6.18 (Amazon's current `kernel-default`); anything
+  but `<major>.<minor>` is refused, so no wildcard reaches the filter. The
+  root device name still comes from the lookup (`/dev/xvda`).
+- A fleet on a minimal image gets a new launch-template version with the
+  standard image, and the instance refresh replaces every router. The
+  user data does not change beyond the `router-setup.sh` pin.
+- `docs/safety.md`'s known issue on the image pattern is resolved.
+
 ## v1.17.0
 
 - **`pkg/awsrouter`: routers get an 8 GiB root volume instead of the

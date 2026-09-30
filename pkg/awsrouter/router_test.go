@@ -3,6 +3,8 @@ package awsrouter
 import (
 	"fmt"
 	"log/slog"
+	"path"
+	"strings"
 	"sync"
 	"testing"
 
@@ -22,8 +24,9 @@ import (
 // unit-test failure: see the "must pass its own provider" test below,
 // and CHANGELOG.md.
 type providerGuardMocks struct {
-	mu  sync.Mutex
-	res map[string]resource.PropertyMap
+	mu    sync.Mutex
+	res   map[string]resource.PropertyMap
+	calls map[string]resource.PropertyMap // invoke token -> its arguments
 }
 
 func (m *providerGuardMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
@@ -38,6 +41,13 @@ func (m *providerGuardMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMa
 	if args.Provider == "" {
 		return nil, fmt.Errorf("invoke %q carries no explicit provider reference — pass pulumi.Provider(...) naming this package's provider", args.Token)
 	}
+
+	m.mu.Lock()
+	if m.calls == nil {
+		m.calls = map[string]resource.PropertyMap{}
+	}
+	m.calls[args.Token] = args.Args
+	m.mu.Unlock()
 
 	// Enough keys to satisfy every invoke this package makes today
 	// (aws.GetCallerIdentity, ec2.LookupAmi); unused keys are ignored by
@@ -183,6 +193,159 @@ func TestValidateRootVolume(t *testing.T) {
 
 			c := awsRouterTestConfig()
 			c.RootVolume = tc.volume
+			_, runErr := runRouter(t, c)
+			require.Error(t, runErr, "CreateTailscaleInstance must refuse it too")
+		})
+	}
+}
+
+// amiLookupArgs runs CreateTailscaleInstance and returns the arguments
+// of its one AMI lookup.
+func amiLookupArgs(t *testing.T, c TailscaleInstanceConfig) resource.PropertyMap {
+	t.Helper()
+
+	m := &providerGuardMocks{res: map[string]resource.PropertyMap{}}
+
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		provider, err := aws.NewProvider(ctx, "aws", &aws.ProviderArgs{
+			Region: pulumi.String("eu-west-1"),
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = CreateTailscaleInstance(ctx, slog.Default(), provider, c)
+
+		return err
+	}, pulumi.WithMocks("p", "s", m))
+	require.NoError(t, err)
+
+	args, ok := m.calls["aws:ec2/getAmi:getAmi"]
+	require.True(t, ok, "no AMI lookup recorded")
+
+	return args
+}
+
+// amiFilters flattens the lookup's filters to name -> values.
+func amiFilters(t *testing.T, args resource.PropertyMap) map[string][]string {
+	t.Helper()
+
+	out := map[string][]string{}
+
+	for _, f := range args["filters"].ArrayValue() {
+		obj := f.ObjectValue()
+
+		var values []string
+		for _, v := range obj["values"].ArrayValue() {
+			values = append(values, v.StringValue())
+		}
+
+		out[obj["name"].StringValue()] = values
+	}
+
+	return out
+}
+
+// ec2NameMatches is EC2's name-filter wildcard semantics ("*" any run,
+// "?" one character) for the names Amazon publishes, which carry no
+// "/", "[" or "\\" — exactly path.Match's for them.
+func ec2NameMatches(t *testing.T, pattern, name string) bool {
+	t.Helper()
+
+	ok, err := path.Match(pattern, name)
+	require.NoError(t, err)
+
+	return ok
+}
+
+// The lookup can only return a standard AL2023 arm64 image on one
+// kernel line. Before v1.18.0 its "al2023-ami-*-arm64" matched the
+// minimal and ECS images and every kernel line too, and "most recent"
+// picked among them — routers rolled onto a 2 GiB minimal image.
+func TestAMILookupIsTheStandardFamilyOnly(t *testing.T) {
+	// Real Amazon image names, as describe-images lists them.
+	standard618 := []string{
+		"al2023-ami-2023.12.20260928.0-kernel-6.18-arm64",
+		"al2023-ami-2023.12.20260918.0-kernel-6.18-arm64",
+	}
+	never := []string{
+		"al2023-ami-minimal-2023.12.20260928.0-kernel-6.18-arm64",
+		"al2023-ami-minimal-2023.12.20260928.0-kernel-6.12-arm64",
+		"al2023-ami-minimal-2023.12.20260918.0-kernel-6.1-arm64",
+		"al2023-ami-ecs-hvm-2023.0.20260922-kernel-6.1-arm64",
+		"al2023-ami-2023.12.20260928.0-kernel-6.12-arm64",
+		"al2023-ami-2023.12.20260928.0-kernel-6.1-arm64",
+		"al2023-ami-2023.12.20260928.0-kernel-6.18-x86_64",
+		"al2023-ami-minimal-2023.12.20260928.0-kernel-6.18-x86_64",
+	}
+
+	args := amiLookupArgs(t, awsRouterTestConfig())
+
+	assert.Equal(t, []resource.PropertyValue{resource.NewStringProperty("amazon")}, args["owners"].ArrayValue())
+	assert.True(t, args["mostRecent"].BoolValue())
+
+	filters := amiFilters(t, args)
+	assert.Equal(t, []string{"arm64"}, filters["architecture"])
+	assert.Equal(t, []string{"available"}, filters["state"])
+	require.Len(t, filters["name"], 1)
+
+	pattern := filters["name"][0]
+	assert.Equal(t, "al2023-ami-2023.*-kernel-6.18-arm64", pattern)
+
+	for _, name := range standard618 {
+		assert.True(t, ec2NameMatches(t, pattern, name), "must match %s", name)
+	}
+
+	for _, name := range never {
+		assert.False(t, ec2NameMatches(t, pattern, name), "must never match %s", name)
+	}
+
+	assert.False(t, strings.Contains(pattern, "minimal"))
+	assert.True(t, strings.HasPrefix(pattern, "al2023-ami-2023."),
+		"the standard images' own prefix is what shuts out al2023-ami-minimal-*")
+}
+
+func TestAMILookupKernelOverride(t *testing.T) {
+	c := awsRouterTestConfig()
+	c.Image = ImageConfig{Kernel: "6.12"}
+
+	pattern := amiFilters(t, amiLookupArgs(t, c))["name"][0]
+	assert.Equal(t, "al2023-ami-2023.*-kernel-6.12-arm64", pattern)
+	assert.True(t, ec2NameMatches(t, pattern, "al2023-ami-2023.12.20260928.0-kernel-6.12-arm64"))
+	assert.False(t, ec2NameMatches(t, pattern, "al2023-ami-minimal-2023.12.20260928.0-kernel-6.12-arm64"))
+	assert.False(t, ec2NameMatches(t, pattern, "al2023-ami-2023.12.20260928.0-kernel-6.18-arm64"))
+}
+
+func TestValidateImage(t *testing.T) {
+	cases := map[string]struct {
+		image   ImageConfig
+		wantErr bool
+	}{
+		"zero value":      {},
+		"6.1":             {image: ImageConfig{Kernel: "6.1"}},
+		"6.12":            {image: ImageConfig{Kernel: "6.12"}},
+		"wildcard":        {image: ImageConfig{Kernel: "*"}, wantErr: true},
+		"widened":         {image: ImageConfig{Kernel: "6.*"}, wantErr: true},
+		"single char":     {image: ImageConfig{Kernel: "6.?"}, wantErr: true},
+		"minimal smuggle": {image: ImageConfig{Kernel: "6.18-arm64,al2023-ami-minimal"}, wantErr: true},
+		"major only":      {image: ImageConfig{Kernel: "6"}, wantErr: true},
+		"default word":    {image: ImageConfig{Kernel: "default"}, wantErr: true},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := tc.image.validate()
+			if !tc.wantErr {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "is not a <major>.<minor> kernel line")
+
+			c := awsRouterTestConfig()
+			c.Image = tc.image
 			_, runErr := runRouter(t, c)
 			require.Error(t, runErr, "CreateTailscaleInstance must refuse it too")
 		})
