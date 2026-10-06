@@ -5,7 +5,7 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
-## Unreleased
+## v1.20.0
 
 - **`pkg/awsrouter`: `DeployFleet`, `NewOPKSSH` and `NewHostCert`, the stack an estate wrote around `CreateTailscaleInstance`.** `DeployFleet` looks up the environment's VPC and public subnets by tag (`NetworkTags`, defaulting to `Environment`, `ManagedBy=pulumi` and `Type=public`) and creates the fleet in them, from one `FleetArgs` (`FleetArgs.InstanceConfig` is the same value for a caller that does its own lookups). It sets no SSH user CA, on purpose: people sign in through opkssh alone. `NewOPKSSH` and `NewHostCert` build the two optional inputs from what an estate decides (issuer, client, group; the OpenBAO names and principal patterns) with the artifacts pinned to the verified releases (`PinnedOPKSSHVersion` 0.16.0 and `PinnedHostCertVersion` 0.13.0) and their digests, so a caller never retypes a digest. No resource name changes.
 
