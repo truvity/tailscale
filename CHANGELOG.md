@@ -5,9 +5,11 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
-## Unreleased
+## v1.23.0
 
 - **`pkg/acl`: `TierGroups`, the access-level to tier derivation.** Given a caller-owned table of level to `Tier` (VPC, in-cluster) and the roles a scope holds (`Holder`: a level and its directory groups), it returns the sorted, de-duplicated groups that reach each tier. The package never learns the caller's level names. Additive; nothing else changes.
+
+- **`pkg/awsrouter`: `InstanceRoleName` and `HostnamePatterns`; `pkg/tailnet`: `ValidMagicDNSSuffix`.** `InstanceRoleName(environment, tailnet)` is the fleet's IAM role name and AWS name stem (`{environment}-tailscale-{tailnet}`), now exported so a caller that must name the role before the fleet exists does not restate the rule; `baseName` uses it, so no name changes. `HostnamePatterns(cidr, suffix)` turns a VPC CIDR and a tailnet MagicDNS suffix into the known_hosts glob patterns of exactly that VPC's AWS-assigned hostnames (one for an octet-aligned prefix, an enumeration for a split octet, refusals for a single address, IPv6, an over-wide enumeration or a non-ts.net suffix). `tailnet.ValidMagicDNSSuffix` is the one-label-under-ts.net rule. Additive.
 
 ## v1.22.0
 

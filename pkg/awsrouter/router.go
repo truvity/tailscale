@@ -358,7 +358,7 @@ func (c TailscaleInstanceConfig) resourceName(name string) string {
 }
 
 func (c TailscaleInstanceConfig) baseName() string {
-	return fmt.Sprintf("%s-tailscale-%s", c.Environment, c.Tailnet)
+	return InstanceRoleName(c.Environment, c.Tailnet)
 }
 
 // CreateTailscaleInstance creates all resources for the Tailscale subnet router:
