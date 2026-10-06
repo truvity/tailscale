@@ -320,7 +320,6 @@ func (in Inputs) deployAuthKeys(ctx *pulumi.Context, logger *slog.Logger, provid
 			slog.String("tailnet", in.Tailnet.Name),
 			slog.String("environment", n.Name),
 			slog.String("tag", tag),
-			slog.String("path", in.AuthKeyPath),
 		)
 	}
 
