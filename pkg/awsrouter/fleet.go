@@ -44,6 +44,10 @@ type (
 		// the parameter it reads its auth key from at boot.
 		Tailnet        string
 		SSMAuthKeyPath string
+		// ResourcePrefix is prepended to the fleet's Pulumi resource names,
+		// so several tailnets' fleets fit in one stack (see
+		// TailscaleInstanceConfig); empty keeps the names.
+		ResourcePrefix string
 		// PermissionsBoundaryName is the account-local IAM policy attached as
 		// the router role's boundary; empty is none.
 		PermissionsBoundaryName string
@@ -94,6 +98,7 @@ func (a FleetArgs) InstanceConfig(vpcID pulumi.IDOutput, subnets []pulumi.IDOutp
 		Max:                     a.Max,
 		WarmPool:                a.WarmPool,
 		Tailnet:                 a.Tailnet,
+		ResourcePrefix:          a.ResourcePrefix,
 		SSMAuthKeyPath:          a.SSMAuthKeyPath,
 		PermissionsBoundaryName: a.PermissionsBoundaryName,
 		OPKSSH:                  a.OPKSSH,

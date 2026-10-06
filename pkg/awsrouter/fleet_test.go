@@ -2,6 +2,7 @@ package awsrouter
 
 import (
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -157,4 +158,46 @@ func TestNewHostCertPinsTheArtifactAndKeepsTheEstatesNames(t *testing.T) {
 	// A caller changing its copy must not change the pin.
 	h.ArtifactSHA256["arm64"] = "changed"
 	assert.NotEqual(t, "changed", NewHostCert(HostCertPreset{}).ArtifactSHA256["arm64"])
+}
+
+func TestTwoTailnetsFleetsFitInOneStack(t *testing.T) {
+	m := &fleetMocks{providerGuardMocks: providerGuardMocks{res: map[string]resource.PropertyMap{}}}
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+		provider, err := aws.NewProvider(ctx, "aws", &aws.ProviderArgs{Region: pulumi.String("eu-west-1")})
+		if err != nil {
+			return err
+		}
+
+		if err := DeployFleet(ctx, slog.Default(), provider, exampleFleet()); err != nil {
+			return err
+		}
+
+		other := exampleFleet()
+		other.Tailnet = "other"
+		other.SSMAuthKeyPath = "/tailscale/other/auth-key"
+		other.ResourcePrefix = "other-"
+
+		return DeployFleet(ctx, slog.Default(), provider, other)
+	}, pulumi.WithMocks("p", "s", m))
+	require.NoError(t, err)
+
+	// The unprefixed fleet keeps the names it always had; the other one
+	// carries its prefix on every resource, and names its AWS objects
+	// after its own tailnet.
+	for _, name := range []string{"tailscale-sg", "tailscale-sg-ingress-wireguard", "tailscale-sg-egress-all",
+		"tailscale-role", "tailscale-instance-profile", "tailscale-lt", "tailscale-asg",
+		"tailscale-lifecycle-hook", "tailscale-cpu-alarm", "tailscale-status-alarm"} {
+		found := 0
+
+		for key := range m.res {
+			if strings.HasSuffix(key, "/"+name) || strings.HasSuffix(key, "/other-"+name) {
+				found++
+			}
+		}
+
+		assert.Equal(t, 2, found, "%s: one per fleet", name)
+	}
+
+	assert.Equal(t, "example-tailscale-other", m.res["aws:ec2/securityGroup:SecurityGroup/other-tailscale-sg"]["name"].StringValue())
+	assert.Equal(t, "example-tailscale-acme", m.res["aws:ec2/securityGroup:SecurityGroup/tailscale-sg"]["name"].StringValue())
 }
