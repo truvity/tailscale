@@ -7,7 +7,15 @@ together at every version.
 
 ## Unreleased
 
+- **`pkg/mesh`: the tailnet stack, from one `Inputs` value.** `mesh.Deploy` registers a tailnet's provider (from its OAuth client), its ACL (`pkg/acl`, over the networks and clusters the tailnet carries and the groups it resolves), the per-network router auth keys (each written to its network's account), the per-cluster router keys (SSM where `K8sKeyInSSM` says so, any other store through `K8sKeySink`), the split DNS (`SplitDNSEntries`: each member network's domain through its own resolver, the base domain through the hub's for tailnets the hub joins, extra domains, and per cluster `K8sSplitDNS`: `cluster.local` on one named owner, an EKS private-endpoint zone through the VPC resolver, a self-hosted cluster's own domain) and, on the primary tailnet, flow logs (`LoadFlowLogConfig`). `Inputs.Validate` refuses a hub on a non-primary tailnet. `Tailnet.FilterGroups` keeps the groups a tailnet's directory domain resolves. Nothing names a tailnet, a domain, a tag or a path: the caller's own part of the policy (manager tag, extra owners and grants) rides in `Inputs.Policy`, and keys rotate by month in the resource name, as `pkg/tailnet` does. Moved out of an estate's deploy glue; no resource name changes.
+
+## v1.20.0
+
 - **`pkg/awsrouter`: `DeployFleet`, `NewOPKSSH` and `NewHostCert`, the stack an estate wrote around `CreateTailscaleInstance`.** `DeployFleet` looks up the environment's VPC and public subnets by tag (`NetworkTags`, defaulting to `Environment`, `ManagedBy=pulumi` and `Type=public`) and creates the fleet in them, from one `FleetArgs` (`FleetArgs.InstanceConfig` is the same value for a caller that does its own lookups). It sets no SSH user CA, on purpose: people sign in through opkssh alone. `NewOPKSSH` and `NewHostCert` build the two optional inputs from what an estate decides (issuer, client, group; the OpenBAO names and principal patterns) with the artifacts pinned to the verified releases (`PinnedOPKSSHVersion` 0.16.0 and `PinnedHostCertVersion` 0.13.0) and their digests, so a caller never retypes a digest. No resource name changes.
+
+## v1.19.1
+
+- Dependency updates.
 
 ## v1.19.0
 
