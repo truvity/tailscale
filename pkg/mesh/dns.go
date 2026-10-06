@@ -159,7 +159,7 @@ func (in Inputs) deployK8sSplitDNS(ctx *pulumi.Context, logger *slog.Logger, pro
 			continue
 		}
 
-		entries, err := in.K8sSplitDNS(c)
+		entries, err := in.K8sSplitDNS(*c)
 		if err != nil {
 			return fmt.Errorf("derive split dns for %s: %w", c.Name, err)
 		}

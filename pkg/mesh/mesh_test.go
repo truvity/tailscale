@@ -208,7 +208,7 @@ func TestClusterInTailnet(t *testing.T) {
 
 func TestDeployRegistersTheNamedResources(t *testing.T) {
 	in := exampleInputs()
-	in.FlowLogs = FlowLogConfig{Enabled: true, Bucket: "example-logs", RoleArn: "arn:aws:iam::111122223333:role/flow"}
+	in.FlowLogs = FlowLogConfig{Enabled: true, Bucket: "example-logs", RoleArn: "arn:aws:iam::example:role/flow"}
 	in.Region = "eu-example-1"
 
 	var sunk []string
@@ -231,7 +231,9 @@ func TestDeployRegistersTheNamedResources(t *testing.T) {
 		"k8s-auth-key-dev-2026-10", "k8s-auth-key-hub-2026-10", "k8s-auth-key-lab-2026-10",
 	}, m.names("tailscale:index/tailnetKey:TailnetKey"))
 
-	assert.Equal(t, []string{"k8s-tailscale-auth-key-hub", "tailscale-auth-key-dev", "tailscale-auth-key-hub", "tailscale-auth-key-lab"}, m.names("aws:ssm/parameter:Parameter"))
+	assert.Equal(t,
+		[]string{"k8s-tailscale-auth-key-hub", "tailscale-auth-key-dev", "tailscale-auth-key-hub", "tailscale-auth-key-lab"},
+		m.names("aws:ssm/parameter:Parameter"))
 	assert.Equal(t, "/ts/acme/auth-key", m.input("aws:ssm/parameter:Parameter", "tailscale-auth-key-dev", "name"))
 	assert.Equal(t, "/ts/acme/k8s-hub", m.input("aws:ssm/parameter:Parameter", "k8s-tailscale-auth-key-hub", "name"))
 	assert.Equal(t, []string{"dev", "hub", "lab"}, sunk, "every member cluster's key reaches the sink; the role-less one has none")

@@ -346,7 +346,7 @@ func (in Inputs) deployK8sRouterKeys(ctx *pulumi.Context, logger *slog.Logger, p
 			return fmt.Errorf("create k8s auth key for %s: %w", c.Name, err)
 		}
 
-		if in.K8sKeyInSSM != nil && in.K8sKeyInSSM(c) {
+		if in.K8sKeyInSSM != nil && in.K8sKeyInSSM(*c) {
 			awsProvider, err := in.AWSProvider(ctx, c.Network)
 			if err != nil {
 				return fmt.Errorf("get AWS provider for k8s router %s: %w", c.Name, err)
@@ -363,7 +363,7 @@ func (in Inputs) deployK8sRouterKeys(ctx *pulumi.Context, logger *slog.Logger, p
 		}
 
 		if in.K8sKeySink != nil {
-			if err := in.K8sKeySink(ctx, c, key.Key); err != nil {
+			if err := in.K8sKeySink(ctx, *c, key.Key); err != nil {
 				return err
 			}
 		}
@@ -378,7 +378,7 @@ func (in Inputs) deployK8sRouterKeys(ctx *pulumi.Context, logger *slog.Logger, p
 	return nil
 }
 
-func routerTag(c Cluster) string { return "k8s-" + c.Name + "-router" }
+func routerTag(c *Cluster) string { return "k8s-" + c.Name + "-router" }
 
 func (in Inputs) rotation() string {
 	now := in.Now
@@ -415,8 +415,12 @@ func (in Inputs) sortedNetworks() []Network {
 	return out
 }
 
-func (in Inputs) sortedClusters() []Cluster {
-	out := append([]Cluster(nil), in.Clusters...)
+func (in Inputs) sortedClusters() []*Cluster {
+	out := make([]*Cluster, len(in.Clusters))
+	for i := range in.Clusters {
+		out[i] = &in.Clusters[i]
+	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 
 	return out
@@ -425,7 +429,7 @@ func (in Inputs) sortedClusters() []Cluster {
 // clusterInTailnet reports whether a cluster belongs to the tailnet's
 // rendered world: it must carry the router role AND live on one of the
 // tailnet's member networks.
-func (in Inputs) clusterInTailnet(c Cluster) bool {
+func (in Inputs) clusterInTailnet(c *Cluster) bool {
 	return c.Router && in.hasNetwork(c.Network)
 }
 
@@ -433,9 +437,9 @@ func (in Inputs) clusterInTailnet(c Cluster) bool {
 // extras (for instance a grant that must exist only where a given cluster's
 // network is a member).
 func (in Inputs) ClusterInTailnet(name string) bool {
-	for _, c := range in.Clusters {
-		if c.Name == name {
-			return in.clusterInTailnet(c)
+	for i := range in.Clusters {
+		if in.Clusters[i].Name == name {
+			return in.clusterInTailnet(&in.Clusters[i])
 		}
 	}
 
