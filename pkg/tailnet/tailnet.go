@@ -27,6 +27,7 @@ package tailnet
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"time"
 
 	"github.com/pulumi/pulumi-tailscale/sdk/go/tailscale"
@@ -164,4 +165,14 @@ func ServiceIP(serviceCIDR string, offset uint32) (string, error) {
 	}
 
 	return result.String(), nil
+}
+
+// magicDNSSuffixPattern is one DNS label under ts.net: Tailscale's own
+// `tail<hex>` default, or a customized tailnet DNS name.
+var magicDNSSuffixPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?\.ts\.net$`)
+
+// ValidMagicDNSSuffix reports whether s is a tailnet's MagicDNS suffix: a
+// single DNS label under ts.net (`tail1234.ts.net`, `my-net.ts.net`).
+func ValidMagicDNSSuffix(s string) bool {
+	return magicDNSSuffixPattern.MatchString(s)
 }

@@ -109,3 +109,19 @@ func TestServiceIP(t *testing.T) {
 	_, err = ServiceIP("fd00::/64", 53)
 	require.Error(t, err)
 }
+
+func TestValidMagicDNSSuffix(t *testing.T) {
+	for s, want := range map[string]bool{
+		"tail03ed59.ts.net": true,
+		"my-net.ts.net":     true,
+		"ts.net":            false,
+		"a.b.ts.net":        false,
+		"-x.ts.net":         false,
+		"example.com":       false,
+		"":                  false,
+	} {
+		if got := ValidMagicDNSSuffix(s); got != want {
+			t.Errorf("ValidMagicDNSSuffix(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
