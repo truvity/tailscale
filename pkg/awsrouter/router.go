@@ -119,6 +119,17 @@ type (
 		// Required: every fleet is keyed by its tailnet, so routers of
 		// two tailnets can share a VPC without colliding.
 		Tailnet string
+		// ResourcePrefix is prepended to the Pulumi resource name of
+		// every resource of the fleet ("tailscale-sg" becomes
+		// ResourcePrefix+"tailscale-sg"), so the fleets of several
+		// tailnets fit in one Pulumi stack. Empty (the default): the
+		// names are exactly as before this input existed. It names
+		// nothing in the cloud (the AWS names follow from Environment and
+		// Tailnet), so a stack that changes it for an existing fleet
+		// renames that fleet's resources in its state
+		// (`pulumi state rename`) or gives them aliases, and replaces
+		// nothing.
+		ResourcePrefix string
 		// SSMAuthKeyPath is the auth-key parameter this fleet reads at
 		// boot, written by the caller that mints the tailnet's router
 		// key (pkg/tailnet NewRouterKey).
@@ -340,6 +351,12 @@ func (i ImageConfig) validate() error {
 // account namespace — two tailnets' fleets in the same VPC cannot both
 // own the security group "<environment>-tailscale" — so every fleet is
 // keyed.
+// resourceName is the Pulumi resource name of one of the fleet's
+// resources: ResourcePrefix, then the resource's own name.
+func (c TailscaleInstanceConfig) resourceName(name string) string {
+	return c.ResourcePrefix + name
+}
+
 func (c TailscaleInstanceConfig) baseName() string {
 	return fmt.Sprintf("%s-tailscale-%s", c.Environment, c.Tailnet)
 }
@@ -429,7 +446,7 @@ func createTailscaleSG(
 ) (*ec2.SecurityGroup, error) {
 	env := config.Environment
 
-	sg, err := ec2.NewSecurityGroup(c, "tailscale-sg", &ec2.SecurityGroupArgs{
+	sg, err := ec2.NewSecurityGroup(c, config.resourceName("tailscale-sg"), &ec2.SecurityGroupArgs{
 		Name: pulumi.String(config.baseName()),
 		// Historical wording ("SSM access"): a description change forces
 		// AWS to replace the security group, so it stays as is.
@@ -447,7 +464,7 @@ func createTailscaleSG(
 
 	// UDP 41641 from 0.0.0.0/0 — Tailscale WireGuard
 	// TODO: Add IPv6 ingress rule (::/0 UDP 41641) when IPv6 transport is needed.
-	_, err = ec2.NewSecurityGroupRule(c, "tailscale-sg-ingress-wireguard", &ec2.SecurityGroupRuleArgs{
+	_, err = ec2.NewSecurityGroupRule(c, config.resourceName("tailscale-sg-ingress-wireguard"), &ec2.SecurityGroupRuleArgs{
 		Type:            pulumi.String("ingress"),
 		FromPort:        pulumi.Int(wireGuardPort),
 		ToPort:          pulumi.Int(wireGuardPort),
@@ -461,7 +478,7 @@ func createTailscaleSG(
 	}
 
 	// All outbound
-	_, err = ec2.NewSecurityGroupRule(c, "tailscale-sg-egress-all", &ec2.SecurityGroupRuleArgs{
+	_, err = ec2.NewSecurityGroupRule(c, config.resourceName("tailscale-sg-egress-all"), &ec2.SecurityGroupRuleArgs{
 		Type:            pulumi.String("egress"),
 		FromPort:        pulumi.Int(0),
 		ToPort:          pulumi.Int(0),
@@ -587,7 +604,7 @@ func createTailscaleInstanceProfile(
 		return nil, fmt.Errorf("marshal ASG policy: %w", err)
 	}
 
-	role, err := iam.NewRole(c, "tailscale-role", &iam.RoleArgs{
+	role, err := iam.NewRole(c, config.resourceName("tailscale-role"), &iam.RoleArgs{
 		Name:                pulumi.String(config.baseName()),
 		AssumeRolePolicy:    pulumi.String(string(assumeRolePolicy)),
 		PermissionsBoundary: boundaryPtr(pbARN),
@@ -626,7 +643,7 @@ func createTailscaleInstanceProfile(
 	// the serial console output (docs/safety.md, "Routers: access,
 	// diagnosis and break-glass").
 
-	instanceProfile, err := iam.NewInstanceProfile(c, "tailscale-instance-profile", &iam.InstanceProfileArgs{
+	instanceProfile, err := iam.NewInstanceProfile(c, config.resourceName("tailscale-instance-profile"), &iam.InstanceProfileArgs{
 		Name: pulumi.String(config.baseName()),
 		Role: role.Name,
 		Tags: pulumi.StringMap{
@@ -678,7 +695,7 @@ func createTailscaleLaunchTemplate(
 		return nil, err
 	}
 
-	lt, err := ec2.NewLaunchTemplate(c, "tailscale-lt", &ec2.LaunchTemplateArgs{
+	lt, err := ec2.NewLaunchTemplate(c, config.resourceName("tailscale-lt"), &ec2.LaunchTemplateArgs{
 		Name:                 pulumi.String(config.baseName()),
 		UpdateDefaultVersion: pulumi.Bool(true),
 		ImageId:              pulumi.String(ami.Id),
@@ -846,7 +863,7 @@ func createTailscaleASG(
 		}
 	}
 
-	asg, err := autoscaling.NewGroup(c, "tailscale-asg", asgArgs, pulumi.Provider(awsProvider))
+	asg, err := autoscaling.NewGroup(c, config.resourceName("tailscale-asg"), asgArgs, pulumi.Provider(awsProvider))
 	if err != nil {
 		return nil, fmt.Errorf("create Tailscale ASG: %w", err)
 	}
@@ -854,7 +871,7 @@ func createTailscaleASG(
 	// Lifecycle hook — instance must signal readiness after tailscale up or get terminated.
 	hookName := config.baseName() + "-launch"
 
-	_, err = autoscaling.NewLifecycleHook(c, "tailscale-lifecycle-hook", &autoscaling.LifecycleHookArgs{
+	_, err = autoscaling.NewLifecycleHook(c, config.resourceName("tailscale-lifecycle-hook"), &autoscaling.LifecycleHookArgs{
 		Name:                 pulumi.String(hookName),
 		AutoscalingGroupName: asg.Name,
 		LifecycleTransition:  pulumi.String("autoscaling:EC2_INSTANCE_LAUNCHING"),
@@ -873,7 +890,7 @@ func createTailscaleASG(
 	// is the caller's decision, and an SNS topic in another account needs
 	// cross-account IAM this module does not own. A caller routes them
 	// from CloudWatch (or replaces them with its own alerting).
-	_, err = cloudwatch.NewMetricAlarm(c, "tailscale-cpu-alarm", &cloudwatch.MetricAlarmArgs{
+	_, err = cloudwatch.NewMetricAlarm(c, config.resourceName("tailscale-cpu-alarm"), &cloudwatch.MetricAlarmArgs{
 		Name:               pulumi.String(config.baseName() + "-cpu-high"),
 		ComparisonOperator: pulumi.String("GreaterThanThreshold"),
 		EvaluationPeriods:  pulumi.Int(3),
@@ -896,7 +913,7 @@ func createTailscaleASG(
 		return nil, fmt.Errorf("create Tailscale CPU alarm: %w", err)
 	}
 
-	_, err = cloudwatch.NewMetricAlarm(c, "tailscale-status-alarm", &cloudwatch.MetricAlarmArgs{
+	_, err = cloudwatch.NewMetricAlarm(c, config.resourceName("tailscale-status-alarm"), &cloudwatch.MetricAlarmArgs{
 		Name:               pulumi.String(config.baseName() + "-status-check"),
 		ComparisonOperator: pulumi.String("GreaterThanThreshold"),
 		EvaluationPeriods:  pulumi.Int(2),
