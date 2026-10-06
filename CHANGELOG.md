@@ -5,6 +5,10 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## Unreleased
+
+- **`pkg/acl`: `TierGroups`, the access-level to tier derivation.** Given a caller-owned table of level to `Tier` (VPC, in-cluster) and the roles a scope holds (`Holder`: a level and its directory groups), it returns the sorted, de-duplicated groups that reach each tier. The package never learns the caller's level names. Additive; nothing else changes.
+
 ## v1.22.0
 
 - **`pkg/awsrouter`: `ResourcePrefix`, so the router fleets of several tailnets fit in one Pulumi stack.** `FleetArgs.ResourcePrefix` (and `TailscaleInstanceConfig.ResourcePrefix`) is prepended to the Pulumi resource name of each of the fleet's ten resources (`tailscale-sg` becomes `<prefix>tailscale-sg`). Empty, the default, keeps every name, so upgrading changes nothing. The AWS names still follow from `Environment` and `Tailnet`. A stack that sets a prefix on an existing fleet renames those resources in its state (`pulumi state rename`) or gives them aliases, and nothing is replaced.
