@@ -9,6 +9,10 @@ together at every version.
 
 - **`pkg/awsrouter`: `DeployFleet`, `NewOPKSSH` and `NewHostCert`, the stack an estate wrote around `CreateTailscaleInstance`.** `DeployFleet` looks up the environment's VPC and public subnets by tag (`NetworkTags`, defaulting to `Environment`, `ManagedBy=pulumi` and `Type=public`) and creates the fleet in them, from one `FleetArgs` (`FleetArgs.InstanceConfig` is the same value for a caller that does its own lookups). It sets no SSH user CA, on purpose: people sign in through opkssh alone. `NewOPKSSH` and `NewHostCert` build the two optional inputs from what an estate decides (issuer, client, group; the OpenBAO names and principal patterns) with the artifacts pinned to the verified releases (`PinnedOPKSSHVersion` 0.16.0 and `PinnedHostCertVersion` 0.13.0) and their digests, so a caller never retypes a digest. No resource name changes.
 
+## v1.19.1
+
+- Dependency updates.
+
 ## v1.19.0
 
 - **`pkg/awsrouter`: a router's first SSH host certificate is signed at
