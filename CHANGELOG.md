@@ -5,7 +5,7 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
-## Unreleased
+## v1.21.0
 
 - **`pkg/mesh`: the tailnet stack, from one `Inputs` value.** `mesh.Deploy` registers a tailnet's provider (from its OAuth client), its ACL (`pkg/acl`, over the networks and clusters the tailnet carries and the groups it resolves), the per-network router auth keys (each written to its network's account), the per-cluster router keys (SSM where `K8sKeyInSSM` says so, any other store through `K8sKeySink`), the split DNS (`SplitDNSEntries`: each member network's domain through its own resolver, the base domain through the hub's for tailnets the hub joins, extra domains, and per cluster `K8sSplitDNS`: `cluster.local` on one named owner, an EKS private-endpoint zone through the VPC resolver, a self-hosted cluster's own domain) and, on the primary tailnet, flow logs (`LoadFlowLogConfig`). `Inputs.Validate` refuses a hub on a non-primary tailnet. `Tailnet.FilterGroups` keeps the groups a tailnet's directory domain resolves. Nothing names a tailnet, a domain, a tag or a path: the caller's own part of the policy (manager tag, extra owners and grants) rides in `Inputs.Policy`, and keys rotate by month in the resource name, as `pkg/tailnet` does. Moved out of an estate's deploy glue; no resource name changes.
 
