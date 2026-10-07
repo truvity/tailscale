@@ -52,6 +52,7 @@ package acl
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 )
@@ -74,6 +75,11 @@ type (
 		// RouterTag is the network router's tag, without the "tag:"
 		// prefix.
 		RouterTag string `json:"routerTag" yaml:"routerTag"`
+		// ExtraCIDRs are further routes the network's router advertises
+		// (a peered VPC, say). They are auto-approved for the same router
+		// tag and join VPCCIDR as destinations of the VPC tier. Empty, the
+		// default, renders exactly as before.
+		ExtraCIDRs []string `json:"extraCidrs,omitempty" yaml:"extraCidrs,omitempty"`
 	}
 
 	// Cluster is one Kubernetes cluster.
@@ -242,6 +248,16 @@ type (
 	}
 )
 
+// vpcDst is the VPC tier's destinations: the VPC CIDR, then any extra routes.
+func (n *Network) vpcDst() []string {
+	dst := []string{n.VPCCIDR + ":*"}
+	for _, c := range n.ExtraCIDRs {
+		dst = append(dst, c+":*")
+	}
+
+	return dst
+}
+
 // routerTag returns the cluster's tag without the "tag:" prefix.
 func (c *Cluster) routerTag() string {
 	if c.RouterTag != "" {
@@ -264,6 +280,12 @@ func (p *Policy) Validate() error {
 		}
 
 		nets[n.Name] = true
+
+		for _, c := range n.ExtraCIDRs {
+			if _, err := netip.ParsePrefix(c); err != nil {
+				return fmt.Errorf("acl: network %q extra cidr %q is not a CIDR: %w", n.Name, c, err)
+			}
+		}
 	}
 
 	seen := map[string]bool{}
@@ -416,7 +438,7 @@ func rules(networks []Network, clusters []Cluster, netByName map[string]*Network
 
 		if len(c.VPCGroups) > 0 {
 			if net, ok := netByName[c.Network]; ok {
-				out = append(out, rule{Action: accept, Src: groupSrc(c.VPCGroups), Dst: []string{net.VPCCIDR + ":*"}})
+				out = append(out, rule{Action: accept, Src: groupSrc(c.VPCGroups), Dst: net.vpcDst()})
 			}
 		}
 
@@ -547,6 +569,10 @@ func approvers(networks []Network, clusters []Cluster, netByName map[string]*Net
 
 	for i := range networks {
 		routes[networks[i].VPCCIDR] = []string{"tag:" + networks[i].RouterTag}
+
+		for _, c := range networks[i].ExtraCIDRs {
+			routes[c] = append(routes[c], "tag:"+networks[i].RouterTag)
+		}
 	}
 
 	// Kubernetes routers advertise BOTH their Service CIDR and their
@@ -566,6 +592,10 @@ func approvers(networks []Network, clusters []Cluster, netByName map[string]*Net
 
 		if net, ok := netByName[c.Network]; ok {
 			routes[net.VPCCIDR] = append(routes[net.VPCCIDR], tag)
+
+			for _, x := range net.ExtraCIDRs {
+				routes[x] = append(routes[x], tag)
+			}
 		}
 	}
 

@@ -456,3 +456,34 @@ func TestManagerTagDefaultAndOverride(t *testing.T) {
 	assert.Contains(t, doc.TagOwners, "tag:fleet-manager")
 	assert.Equal(t, []string{"tag:fleet-manager"}, doc.TagOwners["tag:devel-router"])
 }
+
+func TestExtraCIDRsAreApprovedAndReachableLikeTheVPCCIDR(t *testing.T) {
+	base, _ := build(t, examplePolicy())
+
+	p := examplePolicy()
+	p.Networks[0].ExtraCIDRs = []string{"10.9.0.0/24"} // prod
+	_, doc := build(t, p)
+
+	assert.ElementsMatch(t, []string{"tag:prod-router", "tag:k8s-prod-router"}, doc.AutoApprovers.Routes["10.9.0.0/24"])
+
+	var found bool
+
+	for _, r := range doc.ACLs {
+		if len(r.Dst) == 2 && r.Dst[0] == "10.2.0.0/16:*" && r.Dst[1] == "10.9.0.0/24:*" {
+			found = true
+		}
+	}
+
+	assert.True(t, found, "the prod VPC tier also reaches the extra CIDR")
+
+	// Nothing set: byte-identical to a policy that never heard of it.
+	p.Networks[0].ExtraCIDRs = nil
+	again, _ := build(t, p)
+	assert.Equal(t, base, again)
+}
+
+func TestExtraCIDRsMustBeCIDRs(t *testing.T) {
+	p := examplePolicy()
+	p.Networks[0].ExtraCIDRs = []string{"not-a-cidr"}
+	assert.ErrorContains(t, p.Validate(), "not a CIDR")
+}

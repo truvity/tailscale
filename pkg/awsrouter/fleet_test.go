@@ -201,3 +201,34 @@ func TestTwoTailnetsFleetsFitInOneStack(t *testing.T) {
 	assert.Equal(t, "example-tailscale-other", m.res["aws:ec2/securityGroup:SecurityGroup/other-tailscale-sg"]["name"].StringValue())
 	assert.Equal(t, "example-tailscale-acme", m.res["aws:ec2/securityGroup:SecurityGroup/tailscale-sg"]["name"].StringValue())
 }
+
+func TestExtraCIDRsFollowTheVPCCIDRInTheAdvertisedRoutes(t *testing.T) {
+	a := exampleFleet()
+	assert.Equal(t, []string{"10.0.0.0/16"}, a.InstanceConfig(pulumi.ID("vpc").ToIDOutput(), nil).VPCCIDRs, "no extras: unchanged")
+
+	a.ExtraCIDRs = []string{"10.9.0.0/24", "10.10.0.0/24"}
+	assert.Equal(t, []string{"10.0.0.0/16", "10.9.0.0/24", "10.10.0.0/24"}, a.InstanceConfig(pulumi.ID("vpc").ToIDOutput(), nil).VPCCIDRs)
+
+	_, err := runFleet(t, a)
+	require.NoError(t, err)
+}
+
+func TestExtraCIDRsAreValidated(t *testing.T) {
+	for name, extras := range map[string][]string{
+		"not a cidr":            {"banana"},
+		"repeats the VPC CIDR":  {"10.0.0.0/16"},
+		"inside the VPC CIDR":   {"10.0.5.0/24"},
+		"contains the VPC CIDR": {"10.0.0.0/8"},
+		"repeats an extra":      {"10.9.0.0/24", "10.9.0.0/24"},
+		"overlaps an extra":     {"10.9.0.0/24", "10.9.0.128/25"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := exampleFleet()
+			a.ExtraCIDRs = extras
+			require.Error(t, a.ValidateRoutes())
+
+			_, err := runFleet(t, a)
+			require.Error(t, err)
+		})
+	}
+}
