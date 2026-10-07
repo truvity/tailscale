@@ -5,6 +5,10 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## Unreleased
+
+- **`pkg/awsrouter`: `FleetArgs.ExtraCIDRs`, more routes from one router fleet; `pkg/acl` and `pkg/mesh` approve them.** `ExtraCIDRs` lists further CIDRs the fleet advertises after `VPCCIDR`, for example a peered VPC reachable from the router's VPC. `DeployFleet` (and `ValidateRoutes`) refuse an entry that is not a CIDR or that repeats or overlaps `VPCCIDR` or another entry. `acl.Network.ExtraCIDRs` and `mesh.Network.ExtraCIDRs` carry the same list into the policy: each extra CIDR is auto-approved for the network router's tag (and for member clusters' routers on that network) and is a destination of the VPC tier next to `VPCCIDR`. Empty, the default, renders byte-identically to before; opt in by setting the field.
+
 ## v1.23.0
 
 - **`pkg/acl`: `TierGroups`, the access-level to tier derivation.** Given a caller-owned table of level to `Tier` (VPC, in-cluster) and the roles a scope holds (`Holder`: a level and its directory groups), it returns the sorted, de-duplicated groups that reach each tier. The package never learns the caller's level names. Additive; nothing else changes.

@@ -67,6 +67,9 @@ type (
 		Tag string
 		// VPCCIDR is the network's address space.
 		VPCCIDR string
+		// ExtraCIDRs are further routes the network's router advertises;
+		// they are auto-approved for its tag and reachable by the VPC tier.
+		ExtraCIDRs []string
 		// DNSIP is the network's VPC resolver.
 		DNSIP string
 		// PrivateDomain is the domain the network's own resolver answers;

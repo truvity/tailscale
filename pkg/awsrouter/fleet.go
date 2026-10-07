@@ -3,6 +3,7 @@ package awsrouter
 import (
 	"fmt"
 	"log/slog"
+	"net/netip"
 
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/ec2"
@@ -32,11 +33,17 @@ type (
 	FleetArgs struct {
 		Environment string
 		Region      string
-		// VPCCIDR is the one CIDR the fleet advertises.
+		// VPCCIDR is the VPC's own CIDR, the first route the fleet advertises.
 		VPCCIDR string
-		Min     int
-		Desired int
-		Max     int
+		// ExtraCIDRs are further routes the fleet advertises after VPCCIDR,
+		// for example a peered VPC reachable from this one. Each must be a
+		// CIDR that neither repeats nor overlaps VPCCIDR or another extra;
+		// DeployFleet refuses the fleet otherwise. Empty, the default,
+		// advertises VPCCIDR alone.
+		ExtraCIDRs []string
+		Min        int
+		Desired    int
+		Max        int
 		// WarmPool enables a warm pool of the desired size.
 		WarmPool bool
 
@@ -79,6 +86,31 @@ func (t NetworkTags) withDefaults() NetworkTags {
 	return t
 }
 
+// ValidateRoutes refuses ExtraCIDRs that are not CIDRs, or that repeat or
+// overlap VPCCIDR or each other: two overlapping routes from one router are
+// at best redundant and at worst a misconfigured peering.
+func (a FleetArgs) ValidateRoutes() error {
+	routes := append([]string{a.VPCCIDR}, a.ExtraCIDRs...)
+	prefixes := make([]netip.Prefix, len(routes))
+
+	for i, r := range routes {
+		p, err := netip.ParsePrefix(r)
+		if err != nil {
+			return fmt.Errorf("awsrouter: route %q is not a CIDR: %w", r, err)
+		}
+
+		for j := range i {
+			if prefixes[j].Overlaps(p) {
+				return fmt.Errorf("awsrouter: route %q overlaps %q", r, routes[j])
+			}
+		}
+
+		prefixes[i] = p
+	}
+
+	return nil
+}
+
 // InstanceConfig is the TailscaleInstanceConfig for the fleet, once the
 // network is known.
 //
@@ -92,7 +124,7 @@ func (a FleetArgs) InstanceConfig(vpcID pulumi.IDOutput, subnets []pulumi.IDOutp
 		Region:                  a.Region,
 		VPCID:                   vpcID,
 		RouterSubnets:           subnets,
-		VPCCIDRs:                []string{a.VPCCIDR},
+		VPCCIDRs:                append([]string{a.VPCCIDR}, a.ExtraCIDRs...),
 		Min:                     a.Min,
 		Desired:                 a.Desired,
 		Max:                     a.Max,
@@ -113,10 +145,15 @@ func DeployFleet(ctx *pulumi.Context, logger *slog.Logger, provider *aws.Provide
 	goCtx := ctx.Context()
 	tags := args.Network.withDefaults()
 
+	if err := args.ValidateRoutes(); err != nil {
+		return err
+	}
+
 	logger.InfoContext(goCtx, "deploying Tailscale router",
 		slog.String("environment", args.Environment),
 		slog.String("tailnet", args.Tailnet),
 		slog.String("cidr", args.VPCCIDR),
+		slog.Any("extra_cidrs", args.ExtraCIDRs),
 		slog.Int("desired", args.Desired),
 		slog.Bool("opkssh", args.OPKSSH != nil),
 		slog.Bool("host_cert", args.HostCert != nil),

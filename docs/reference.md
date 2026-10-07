@@ -67,6 +67,7 @@ it refuses.
 | `Name` | required, unique; `Cluster.Network` refers to it |
 | `VPCCIDR` | required; the VPC tier's destination, auto-approved for `RouterTag` |
 | `RouterTag` | required; without the `tag:` prefix |
+| `ExtraCIDRs` | optional further routes the router advertises (a peered VPC, say); each is auto-approved like `VPCCIDR` and joins it as a VPC-tier destination |
 
 ### `Cluster`
 

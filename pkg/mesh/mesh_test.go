@@ -338,3 +338,22 @@ func (m *mocks) input(typ, name, key string) string {
 
 	return ""
 }
+
+func TestPolicyModelCarriesTheNetworksExtraCIDRs(t *testing.T) {
+	in := exampleInputs()
+	in.Tailnet.Networks = []string{"dev"}
+
+	for i := range in.Networks {
+		if in.Networks[i].Name == "dev" {
+			in.Networks[i].ExtraCIDRs = []string{"10.99.0.0/24"}
+		}
+	}
+
+	p, err := in.PolicyModel()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.99.0.0/24"}, p.Networks[0].ExtraCIDRs)
+
+	doc, err := acl.Build(p)
+	require.NoError(t, err)
+	assert.Contains(t, doc, `"10.99.0.0/24"`)
+}

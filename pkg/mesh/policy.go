@@ -27,7 +27,7 @@ func (in Inputs) PolicyModel() (acl.Policy, error) {
 			continue
 		}
 
-		p.Networks = append(p.Networks, acl.Network{Name: n.Name, VPCCIDR: n.VPCCIDR, RouterTag: n.Tag})
+		p.Networks = append(p.Networks, acl.Network{Name: n.Name, VPCCIDR: n.VPCCIDR, RouterTag: n.Tag, ExtraCIDRs: n.ExtraCIDRs})
 	}
 
 	for _, c := range in.sortedClusters() {
