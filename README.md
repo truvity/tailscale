@@ -10,6 +10,7 @@ DNS as code.
 | `pkg/acl` | Pure tailnet policy builder: tag ownership, two access tiers, per-environment route auto-approval, from a neutral model; deterministic JSON out | shipped |
 | `pkg/tailnet` | Pulumi Go: the policy resource (sole owner), router auth keys (ephemeral, tagged, rotated by name), split DNS, S3 flow logs, a pinned service-IP helper | shipped |
 | `pkg/awsrouter` | Pulumi Go: an EC2 auto-scaling subnet router fleet (security group, least-privilege role, launch template, ASG with optional warm pool), optional SSH user-certificate login and optional OIDC sign-in via opkssh; the one cloud-specific package | shipped |
+| `pkg/hostaccess` | opkssh OIDC sign-in and OpenBAO-signed SSH host certificates for an EC2 host that is not a router: the same pinned artifacts and install steps as `pkg/awsrouter`, a principal read from instance metadata, files and a command a consumer's user data applies | shipped |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag; the
 Go module is `github.com/truvity/tailscale`.

@@ -300,6 +300,19 @@ checksum-verified, not re-rendered per router. There is still no way to
 raise EC2's limit; the bootstrap split means almost nothing that varies by
 router counts against it any more.
 
+### pkg/hostaccess: the same limit, a different margin
+
+A host that is not a router has its own user data, usually with a setup of
+its own already in it. `hostaccess-setup.sh` is about 16 KB, the whole limit
+by itself, so by default it is downloaded and checked against the sha256
+`pkg/hostaccess` computes from its embedded copy (a mismatch runs nothing),
+which leaves about 1.8 KB of user data for opkssh plus host certificates.
+Inline delivery needs `gz+b64` (about 9 KB). `TestBundleSizes` pins both
+figures. The opkssh and host-certificate steps are the same text as the
+router's (`TestSharedWithRouterSetup`), so every guarantee above holds there
+too; the principal patterns additionally refuse a wildcard in the last two
+DNS labels.
+
 ### The bootstrap split: a download must never partially apply
 
 `router-setup.sh` (`pkg/awsrouter/bootstrap.go`'s `go:embed`, published as

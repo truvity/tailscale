@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/truvity/tailscale/pkg/hostaccess"
 )
 
 // hostCertPrincipalPatterns is HostCert.PrincipalPatterns, comma-joined
@@ -74,69 +76,17 @@ func (c TailscaleInstanceConfig) hostCertCABundleLines() []string {
 // nil HostCert, or HostCert.Enabled false (the default): none of the
 // above runs, and the user data renders exactly as it did before this
 // input existed.
-type (
-	// HostCertConfig configures optional SSH host-certificate renewal.
-	// A caller can populate every other field ahead of a rollout and
-	// flip Enabled later without touching anything else — the same
-	// convention OPKSSHConfig takes.
-	HostCertConfig struct {
-		Enabled bool
-
-		// ArtifactVersion is the truvity/openbao release these artifacts
-		// come from, e.g. "0.13.0" (no leading "v") — the same shape
-		// RouterSetupVersion takes, because it composes into the same
-		// kind of GitHub Release download URL.
-		ArtifactVersion string
-		// ArtifactSHA256 is the openbao-hostcert archive's sha256, per
-		// GOARCH ("arm64", "amd64", ...) as goreleaser names its
-		// archives (openbao-hostcert_<version>_linux_<arch>.tar.gz).
-		// This package deploys arm64 only (router.go's LookupAmi), so
-		// only that key is ever read, but the map is keyed by arch
-		// rather than being one flat field so a future architecture
-		// does not need a new field name here.
-		ArtifactSHA256 map[string]string
-
-		// Address is OpenBAO's URL as the router reaches it
-		// (https://openbao.example.internal). No trailing slash.
-		Address string
-		// CABundle is a PEM bundle to trust beyond AL2023's OS roots,
-		// written to its own file and passed as openbao-hostcert's
-		// --ca-cert. Empty: the OS trust store alone.
-		CABundle string
-		// Namespace is the OpenBAO namespace both the AWS IAM login and
-		// the certificate sign call are made in. Empty: root.
-		Namespace string
-		// AuthMount and AuthRole are the AWS IAM auth mount's path and
-		// the role this router's own instance role ARN is bound to,
-		// server-side (openbao-config's business, not this package's —
-		// HostCertConfig only has to match it).
-		AuthMount string
-		AuthRole  string
-		// ServerIDHeader is the value the mount's client configuration
-		// pins as iam_server_id_header_value — must match exactly, or
-		// AWS auth refuses the login.
-		ServerIDHeader string
-		// SSHMount and SSHRole are the SSH host-CA mount and role this
-		// router's certificate is signed with.
-		SSHMount string
-		SSHRole  string
-		// PrincipalPatterns are path.Match globs openbao-hostcert
-		// refuses to request a principal outside of (its own
-		// --principal-pattern, defense in depth: OpenBAO's SSH secrets
-		// engine cannot restrict a host role's domain by CIDR or glob,
-		// only by exact match or DNS suffix — see that tool's own docs).
-		// Required, and neither empty nor a bare "*": either would
-		// defeat the whole point of pinning a pattern here at all.
-		PrincipalPatterns []string
-	}
-)
+// HostCertConfig is defined in pkg/hostaccess, which installs the same
+// openbao-hostcert on hosts that are not routers; this is an alias, so
+// existing callers compile unchanged.
+type HostCertConfig = hostaccess.HostCertConfig
 
 // hostCertArch is the one GOARCH this package ever deploys — AL2023
 // ARM64: router.go's LookupAmi filters on this very architecture (and
 // ImageConfig's name filter ends "-arm64"), so it admits nothing else.
 // A future architecture needs a new entry here AND a new name filter,
 // never one without the other.
-const hostCertArch = "arm64"
+const hostCertArch = hostaccess.HostCertArch
 
 // principalPatternPattern is opksshTokenPattern's same conservative
 // token shape, WITH path.Match's own glob metacharacters ("*", "?")
