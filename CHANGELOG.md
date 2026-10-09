@@ -5,6 +5,10 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## Unreleased
+
+- **`pkg/hostaccess`: `PrincipalFixed`, a host certificate for a fixed name.** `Config.PrincipalSource = PrincipalFixed` with `Config.Principal` (required with it, refused with any other source) makes `openbao-hostcert --principal <name>` use that name as is, with no IMDS or tailscale lookup, for a host that is reached by a stable DNS name rather than the one EC2 gave it. `Validate` refuses a name that is not a lower-case DNS name (wildcard, upper case, shell metacharacters, over 253 bytes, a label over 63) or that matches none of `HostCert.PrincipalPatterns`, which are still checked. The certificate is signed at setup, at every boot and every 12 hours, like `imds-hostname`. The IMDS and tailscale sources render the same files as before; only the embedded `hostaccess-setup.sh` (and so `SetupSHA256()`) changes.
+
 ## v1.24.2
 
 - Dependency updates.

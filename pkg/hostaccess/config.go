@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -60,6 +61,11 @@ const (
 	// `local-hostname`, e.g. ip-10-68-1-2.eu-west-3.compute.internal. It is
 	// the default for this package.
 	PrincipalIMDSHostname PrincipalSource = "imds-hostname"
+	// PrincipalFixed is the one name in Config.Principal, used as is: no
+	// IMDS lookup and no tailscale. It is for a host that is reached by a
+	// stable name (a CNAME or private-zone record) rather than by the name
+	// EC2 gave it. Signed at setup and at every boot, like imds-hostname.
+	PrincipalFixed PrincipalSource = "fixed"
 )
 
 type (
@@ -215,6 +221,10 @@ type Config struct {
 	// PrincipalSource is where the host certificate's principal comes from;
 	// empty is PrincipalIMDSHostname.
 	PrincipalSource PrincipalSource
+	// Principal is the host certificate's principal. Required (a lower-case
+	// DNS name, no wildcard, matching one of HostCert.PrincipalPatterns) when
+	// PrincipalSource is PrincipalFixed, and refused otherwise.
+	Principal string
 }
 
 func (c Config) principalSource() PrincipalSource {
@@ -234,11 +244,14 @@ var (
 	}
 	// tokenPattern is conservative on purpose: these values reach a sourced
 	// shell env file and space-delimited opkssh files.
-	tokenPattern        = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
-	loginUserPattern    = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
-	sha256HexPattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	versionPattern      = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
-	principalGlobPatten = regexp.MustCompile(`^[A-Za-z0-9._:*?-]+$`)
+	tokenPattern     = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
+	loginUserPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	sha256HexPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	versionPattern   = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+	// fixedPrincipalPattern: dot-separated labels of lower-case letters,
+	// digits and inner hyphens. Length limits are checked separately.
+	fixedPrincipalPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+	principalGlobPatten   = regexp.MustCompile(`^[A-Za-z0-9._:*?-]+$`)
 	// urlPattern admits no shell metacharacter, quote or space: URLs land in
 	// double quotes in a sourced env file.
 	urlPattern = regexp.MustCompile(`^https://[A-Za-z0-9._~:/?#@!&'*+,;=%-]+$`)
@@ -256,9 +269,23 @@ func (c Config) Validate() error {
 	}
 
 	switch c.principalSource() {
-	case PrincipalTailscale, PrincipalIMDSHostname:
+	case PrincipalTailscale, PrincipalIMDSHostname, PrincipalFixed:
 	default:
-		return fmt.Errorf("hostaccess: PrincipalSource %q is not %q or %q", c.PrincipalSource, PrincipalTailscale, PrincipalIMDSHostname)
+		return fmt.Errorf("hostaccess: PrincipalSource %q is not %q, %q or %q", c.PrincipalSource, PrincipalTailscale, PrincipalIMDSHostname, PrincipalFixed)
+	}
+
+	if c.principalSource() != PrincipalFixed && c.Principal != "" {
+		return fmt.Errorf("hostaccess: Principal is set but PrincipalSource is %q; it is only for %q", c.principalSource(), PrincipalFixed)
+	}
+
+	if c.principalSource() == PrincipalFixed {
+		if !c.hostCertOn() {
+			return errors.New("hostaccess: PrincipalSource fixed needs HostCert enabled")
+		}
+
+		if err := validateFixedPrincipal(c.Principal, c.HostCert.PrincipalPatterns); err != nil {
+			return fmt.Errorf("hostaccess: Principal: %w", err)
+		}
 	}
 
 	if c.opksshOn() {
@@ -392,6 +419,43 @@ func validateHostCert(h *HostCertConfig) error {
 	}
 
 	return nil
+}
+
+// validateFixedPrincipal refuses a Config.Principal that is not a plain,
+// lower-case DNS name (no wildcard, no shell metacharacter, at most 253
+// bytes, labels of 1 to 63 of letters, digits and hyphens, none starting or
+// ending in a hyphen, at least two labels), or that no pattern matches.
+func validateFixedPrincipal(name string, patterns []string) error {
+	if name == "" {
+		return errors.New("is required with PrincipalSource fixed")
+	}
+
+	if len(name) > 253 {
+		return fmt.Errorf("is %d bytes; a DNS name has at most 253", len(name))
+	}
+
+	if !fixedPrincipalPattern.MatchString(name) {
+		return fmt.Errorf("%q is not a lower-case DNS name (letters, digits, hyphens and dots; no wildcard)", name)
+	}
+
+	labels := strings.Split(name, ".")
+	if len(labels) < 2 {
+		return fmt.Errorf("%q has no domain", name)
+	}
+
+	for _, l := range labels {
+		if len(l) > 63 {
+			return fmt.Errorf("%q has a label of %d bytes; at most 63", name, len(l))
+		}
+	}
+
+	for _, p := range patterns {
+		if ok, err := path.Match(p, name); err == nil && ok {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("%q matches none of HostCert.PrincipalPatterns", name)
 }
 
 // validatePrincipalPattern refuses a pattern that could match a name outside

@@ -150,7 +150,7 @@ n, err := bundle.Size(hostaccess.EncodingPlain)                  // bytes added 
 
 | Name | What |
 |---|---|
-| `Config{OPKSSH, HostCert, PrincipalSource}` | the inputs; at least one of the two features enabled. `OPKSSHConfig`, `HostCertConfig`, the presets, `NewOPKSSH`, `NewHostCert` and the pins are the ones `pkg/awsrouter` re-exports |
+| `Config{OPKSSH, HostCert, PrincipalSource, Principal}` | the inputs; at least one of the two features enabled. `OPKSSHConfig`, `HostCertConfig`, the presets, `NewOPKSSH`, `NewHostCert` and the pins are the ones `pkg/awsrouter` re-exports |
 | `Config.Validate()` | refuses a malformed digest, a URL with shell syntax, empty providers or identities, `root`, and principal patterns that can match outside one domain |
 | `Render(Config, Options) (*Bundle, error)` | `Options.Delivery` is `DeliveryDownload` (default; needs `Options.Version`, the release the module is pinned to) or `DeliveryInline` |
 | `Bundle.Packages` | install first: `checkpolicy` when opkssh is on (it compiles the SELinux module) |
@@ -166,9 +166,12 @@ for a token, then the token on the GET), the EC2 private DNS name such as
 passes it as `--principal`; `openbao-hostcert` checks it against the patterns
 again. `PrincipalTailscale` is the router's `tailscale status` lookup, and
 there the caller runs `/usr/local/sbin/openbao-hostcert-boot.sh` after the
-join.
+join. `PrincipalFixed` (`fixed`) uses `Config.Principal` as is, with no lookup:
+a lower-case DNS name (no wildcard, at most 253 bytes, labels of at most 63)
+that must match one of `HostCert.PrincipalPatterns`. `Principal` is required
+with `fixed` and refused with any other source.
 
-**Renewal.** With `imds-hostname` the first certificate is signed during
+**Renewal.** With `imds-hostname` or `fixed` the first certificate is signed during
 setup, again at every boot (`openbao-hostcert-boot.service`, so a stopped and
 restarted host never waits on the timer) and every 12 hours with up to 10
 minutes of jitter (`openbao-hostcert.timer`). Bounded and fail-safe: three

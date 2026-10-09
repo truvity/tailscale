@@ -47,7 +47,7 @@ const (
 	SetupPath = "/usr/local/sbin/hostaccess-setup.sh"
 	// BootSignerPath is the script that signs the host certificate once, now.
 	// A consumer on PrincipalTailscale runs it after the tailnet join; with
-	// PrincipalIMDSHostname the setup script and a boot-time unit already do.
+	// PrincipalIMDSHostname or PrincipalFixed the setup script and a boot-time unit already do.
 	BootSignerPath = "/usr/local/sbin/openbao-hostcert-boot.sh"
 )
 
@@ -170,6 +170,10 @@ func Render(c Config, o Options) (*Bundle, error) {
 			{"HOST_CERT_SSH_ROLE", h.SSHRole},
 			{"HOST_CERT_PRINCIPAL_PATTERNS", strings.Join(h.PrincipalPatterns, ",")},
 		})
+
+		if c.principalSource() == PrincipalFixed {
+			envLines(&env, [][2]string{{"HOST_CERT_PRINCIPAL", c.Principal}})
+		}
 
 		if h.CABundle != "" {
 			b.Files = append(b.Files, File{ConfDir + "/hostcert-ca.pem", "0644", strings.TrimRight(h.CABundle, "\n") + "\n"})

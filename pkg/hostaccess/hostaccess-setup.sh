@@ -29,6 +29,9 @@
 #                  (ip-10-68-x-y.<region>.compute.internal); signed once
 #                  here, again at every boot (openbao-hostcert-boot.service)
 #                  and every 12 hours (openbao-hostcert.timer, jittered).
+#   fixed          the one name in HOST_CERT_PRINCIPAL (already validated
+#                  Go-side as a lower-case DNS name); no lookup at all.
+#                  Signed and renewed on the same schedule as imds-hostname.
 #
 # Every failure is fail-safe for the host: sshd keeps its plain host key
 # and the script carries on. ROOT-prefixed paths and overridable host
@@ -289,6 +292,21 @@ esac
 exec /usr/local/bin/openbao-hostcert --principal "$PRINCIPAL"
 EOF
       ;;
+    fixed)
+      # The name was validated Go-side (a lower-case DNS name matching the
+      # principal patterns); here it only has to be non-empty and plain.
+      case "${HOST_CERT_PRINCIPAL:-}" in
+        "" | *[!a-z0-9.-]*)
+          fail "principal"
+          return 0
+          ;;
+      esac
+      cat >"$ROOT/usr/local/sbin/openbao-hostcert-run.sh" <<EOF
+#!/bin/bash
+set -uo pipefail
+exec /usr/local/bin/openbao-hostcert --principal "$HOST_CERT_PRINCIPAL"
+EOF
+      ;;
     *)
       fail "principal-source"
       return 0
@@ -395,7 +413,7 @@ EOF
 
   # Signed again at every boot, not only at the first: a stopped and
   # restarted host must not wait on the timer with an expired certificate.
-  if [ "$HOST_CERT_PRINCIPAL_SOURCE" = "imds-hostname" ]; then
+  if [ "$HOST_CERT_PRINCIPAL_SOURCE" != "tailscale" ]; then
     cat >"$ROOT/etc/systemd/system/openbao-hostcert-boot.service" <<'EOF'
 [Unit]
 Description=Sign this host's SSH host certificate at boot (openbao-hostcert)
@@ -414,7 +432,7 @@ EOF
 
   if sshd_check; then
     svc_enable_now openbao-hostcert.timer
-    if [ "$HOST_CERT_PRINCIPAL_SOURCE" = "imds-hostname" ]; then
+    if [ "$HOST_CERT_PRINCIPAL_SOURCE" != "tailscale" ]; then
       svc_enable openbao-hostcert-boot.service
       sign_host_cert
     fi

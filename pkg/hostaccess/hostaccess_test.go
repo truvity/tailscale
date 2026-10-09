@@ -468,3 +468,151 @@ func TestIMDSHostnameRefusesUnusableAnswers(t *testing.T) {
 	_, err := runWrapper(t, `exit 7`)
 	assert.Error(t, err, "IMDS unreachable")
 }
+
+// ── PrincipalFixed ────────────────────────────────────────────────────
+
+func fixedConfig() Config {
+	c := testConfig()
+	c.PrincipalSource = PrincipalFixed
+	c.Principal = "status.example.private"
+	c.HostCert.PrincipalPatterns = []string{"status.example.private"}
+
+	return c
+}
+
+func TestFixedPrincipalRenders(t *testing.T) {
+	b, err := Render(fixedConfig(), Options{Version: "1.25.0"})
+	require.NoError(t, err)
+
+	env := findFile(t, b, ConfDir+"/hostaccess.env").Content
+	assert.Contains(t, env, "HOST_CERT_PRINCIPAL_SOURCE=\"fixed\"\n")
+	assert.Contains(t, env, "HOST_CERT_PRINCIPAL=\"status.example.private\"\n")
+	assert.Contains(t, env, "HOST_CERT_PRINCIPAL_PATTERNS=\"status.example.private\"\n")
+
+	// The other sources render no HOST_CERT_PRINCIPAL line at all.
+	for _, src := range []PrincipalSource{"", PrincipalIMDSHostname, PrincipalTailscale} {
+		c := testConfig()
+		c.PrincipalSource = src
+		b, err := Render(c, Options{Version: "1.25.0"})
+		require.NoError(t, err)
+		assert.NotContains(t, findFile(t, b, ConfDir+"/hostaccess.env").Content, "HOST_CERT_PRINCIPAL=")
+	}
+}
+
+func TestFixedPrincipalSetup(t *testing.T) {
+	root, out := runSetup(t, fixedConfig(), "")
+	assert.Contains(t, out, "hostaccess-setup: hostcert installed")
+
+	wrapper := read(t, filepath.Join(root, "usr/local/sbin/openbao-hostcert-run.sh"))
+	assert.Equal(t, "#!/bin/bash\nset -uo pipefail\nexec /usr/local/bin/openbao-hostcert --principal \"status.example.private\"\n", wrapper)
+	assert.NotContains(t, wrapper, "169.254.169.254")
+	assert.NotContains(t, wrapper, "tailscale")
+
+	// Signed at setup and at every boot, like imds-hostname.
+	calls := read(t, filepath.Join(root, "calls.log"))
+	assert.Contains(t, calls, "sign_host_cert")
+	assert.Contains(t, calls, "svc_enable openbao-hostcert-boot.service")
+	assert.FileExists(t, filepath.Join(root, "etc/systemd/system/openbao-hostcert-boot.service"))
+	assert.Contains(t, read(t, filepath.Join(root, "etc/systemd/system/openbao-hostcert.service")), "After=network-online.target\n")
+}
+
+func TestFixedPrincipalWrapperRuns(t *testing.T) {
+	root, _ := runSetup(t, fixedConfig(), "")
+	dir := t.TempDir()
+
+	wrapper := read(t, filepath.Join(root, "usr/local/sbin/openbao-hostcert-run.sh"))
+	wrapper = strings.ReplaceAll(wrapper, "/usr/local/bin/openbao-hostcert", filepath.Join(dir, "openbao-hostcert"))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "openbao-hostcert"), []byte("#!/bin/bash\necho \"principal=$2\"\n"), 0o755))
+	// curl would fail: the wrapper must not need it.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "curl"), []byte("#!/bin/bash\nexit 7\n"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "run.sh"), []byte(wrapper), 0o755))
+
+	cmd := exec.Command("bash", filepath.Join(dir, "run.sh"))
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+	o, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(o))
+	assert.Equal(t, "principal=status.example.private\n", string(o))
+}
+
+func TestFixedPrincipalRefusals(t *testing.T) {
+	long := strings.Repeat("a", 64) + ".example.private"
+	tooLong := strings.Repeat("a.", 127) + "bc" // 256 bytes
+
+	for _, bad := range []string{
+		"", "*.example.private", "status.*.private", "Status.example.private", "status.example.PRIVATE",
+		"status", "status.example.private.", ".status.example.private", "a..b", "-a.example.private", "a-.example.private",
+		"a b.example.private", "a;id.example.private", "$(id).example.private", "a`id`.example.private",
+		"a\"b.example.private", "a'b.example.private", "a|b.example.private", "a\\b.example.private", "a/b.example.private",
+		"a_b.example.private", "status.example.private\n", long, tooLong,
+	} {
+		c := fixedConfig()
+		c.Principal = bad
+		c.HostCert.PrincipalPatterns = []string{"*.example.private"}
+		assert.Error(t, c.Validate(), "principal %q", bad)
+	}
+
+	// A name the patterns do not match.
+	c := fixedConfig()
+	c.Principal = "other.example.private"
+	err := c.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "matches none")
+
+	// Principal without the fixed source is refused, for every other source.
+	for _, src := range []PrincipalSource{"", PrincipalIMDSHostname, PrincipalTailscale} {
+		c := testConfig()
+		c.PrincipalSource = src
+		c.Principal = "status.example.private"
+		assert.Error(t, c.Validate(), "source %q", src)
+	}
+
+	// Fixed needs the host certificate.
+	c = fixedConfig()
+	c.HostCert = nil
+	assert.Error(t, c.Validate())
+
+	// The patterns stay validated on the fixed path.
+	c = fixedConfig()
+	c.HostCert.PrincipalPatterns = []string{"status.example.private", "*"}
+	assert.Error(t, c.Validate())
+
+	// The longest legal name passes.
+	c = fixedConfig()
+	label := strings.Repeat("a", 63)
+	c.Principal = label + "." + label + "." + label + "." + strings.Repeat("b", 61)
+	c.HostCert.PrincipalPatterns = []string{c.Principal}
+	require.Len(t, c.Principal, 253)
+	assert.NoError(t, c.Validate())
+}
+
+func TestFixedPrincipalMatchesAGlobPattern(t *testing.T) {
+	c := fixedConfig()
+	c.HostCert.PrincipalPatterns = []string{"ip-10-68-*.eu-west-3.compute.internal", "stat*.example.private"}
+	c.Principal = "status.example.private"
+	assert.NoError(t, c.Validate())
+}
+
+func TestOtherSourcesRenderUnchanged(t *testing.T) {
+	b, err := Render(testConfig(), Options{Version: "1.25.0"})
+	require.NoError(t, err)
+	assert.Equal(t, "OPKSSH=\"true\"\n"+
+		"OPKSSH_ARTIFACT_VERSION=\"0.16.0\"\n"+
+		"OPKSSH_ARTIFACT_URL=\"https://github.com/openpubkey/opkssh/releases/download/v0.16.0/opkssh-linux-arm64\"\n"+
+		"OPKSSH_ARTIFACT_SHA256=\"9dd10c2b6ce99cde18e52c054877ca014134b291fd82afe71741c68db4f83d44\"\n"+
+		"OPKSSH_SELINUX_URL=\"https://raw.githubusercontent.com/openpubkey/opkssh/v0.16.0/opkssh.te\"\n"+
+		"OPKSSH_SELINUX_SHA256=\"f68bac733ecd604172eb5b4fe6e472eba195bcffa8444e44723e6fb9546926c4\"\n"+
+		"HOST_CERT=\"true\"\n"+
+		"HOST_CERT_PRINCIPAL_SOURCE=\"imds-hostname\"\n"+
+		"HOST_CERT_ARTIFACT_VERSION=\"0.13.0\"\n"+
+		"HOST_CERT_ARTIFACT_SHA256=\"66659c1b0352c880e1b4e78456d702df1c6a68e7e4e853cd429ebb58788fae41\"\n"+
+		"HOST_CERT_ADDRESS=\"https://openbao.example.internal\"\n"+
+		"HOST_CERT_NAMESPACE=\"admin\"\n"+
+		"HOST_CERT_AUTH_MOUNT=\"aws\"\n"+
+		"HOST_CERT_AUTH_ROLE=\"host\"\n"+
+		"HOST_CERT_SERVER_ID_HEADER=\"openbao.example.internal\"\n"+
+		"HOST_CERT_SSH_MOUNT=\"ssh-host\"\n"+
+		"HOST_CERT_SSH_ROLE=\"host\"\n"+
+		"HOST_CERT_PRINCIPAL_PATTERNS=\"ip-10-68-*.eu-west-3.compute.internal\"\n",
+		findFile(t, b, ConfDir+"/hostaccess.env").Content)
+}
