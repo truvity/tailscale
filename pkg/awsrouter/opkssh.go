@@ -54,6 +54,7 @@ import (
 // nil OPKSSH, or OPKSSH.Enabled false (the default): none of the above
 // runs, and the user data renders exactly as it did before this input
 // existed.
+
 // The types are defined in pkg/hostaccess, which installs the same
 // opkssh on hosts that are not routers; these are aliases, so existing
 // callers compile unchanged.
