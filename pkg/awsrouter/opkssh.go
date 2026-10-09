@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+
+	"github.com/truvity/tailscale/pkg/hostaccess"
 )
 
 // opkssh (OpenPubkey SSH): OIDC sign-in to the accounts sshd already
@@ -52,55 +54,18 @@ import (
 // nil OPKSSH, or OPKSSH.Enabled false (the default): none of the above
 // runs, and the user data renders exactly as it did before this input
 // existed.
+// The types are defined in pkg/hostaccess, which installs the same
+// opkssh on hosts that are not routers; these are aliases, so existing
+// callers compile unchanged.
 type (
 	// OPKSSHConfig configures optional OIDC sign-in via opkssh. A caller
 	// can populate every other field ahead of a rollout and flip Enabled
 	// later without touching anything else.
-	OPKSSHConfig struct {
-		Enabled bool
-
-		// ArtifactVersion is the opkssh release these artifacts come
-		// from, e.g. "0.16.0" — recorded in /var/log/opkssh.log by
-		// router-setup.sh's own install log line.
-		ArtifactVersion string
-		// ArtifactURL/ArtifactSHA256 are the opkssh binary for this
-		// fleet's AMI architecture. This package is AL2023 ARM64 only
-		// (see router.go's LookupAmi), so there is one binary, not one
-		// per architecture; a sha256 mismatch aborts the install.
-		ArtifactURL    string
-		ArtifactSHA256 string
-		// SELinuxModuleURL/SHA256 are opkssh.te at the same tag. AL2023
-		// runs SELinux enforcing and this module ships neither in the
-		// binary nor in the rpm.
-		SELinuxModuleURL    string
-		SELinuxModuleSHA256 string
-
-		// Providers are the OpenID Providers /etc/opk/providers admits,
-		// rendered one per line in this order.
-		Providers []OPKSSHProvider
-		// AuthorizedIdentities are the /etc/opk/auth_id entries,
-		// rendered one per line in this order. Each admits User to sign
-		// in as the identity oidc:groups:Group, trusted only when
-		// Issuer signed the ID token.
-		AuthorizedIdentities []OPKSSHAuthID
-	}
-
-	// OPKSSHProvider is one /etc/opk/providers line: an OpenID Provider
-	// this router's opkssh trusts, its client id (the audience claim
-	// opkssh requires), and how long the ssh key opkssh mints stays
-	// valid.
-	OPKSSHProvider struct {
-		Issuer     string // https issuer URI, exact string match
-		ClientID   string
-		Expiration string // one of opksshExpirationPolicies
-	}
-
+	OPKSSHConfig = hostaccess.OPKSSHConfig
+	// OPKSSHProvider is one /etc/opk/providers line.
+	OPKSSHProvider = hostaccess.OPKSSHProvider
 	// OPKSSHAuthID is one /etc/opk/auth_id line.
-	OPKSSHAuthID struct {
-		User   string // local login user (an existing account)
-		Group  string // bare group name; rendered as oidc:groups:<Group>
-		Issuer string // must be one of OPKSSHConfig.Providers' Issuer
-	}
+	OPKSSHAuthID = hostaccess.OPKSSHAuthID
 )
 
 // opksshExpirationPolicies are the only values opkssh's

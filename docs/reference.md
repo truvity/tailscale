@@ -122,6 +122,77 @@ top-level and named by the caller, and the provider comes in through
 | | `Expiry` | 90 days (`tailnet.DefaultKeyExpiry`) | the stack must apply at least once inside it |
 | `S3FlowLogs` | `Bucket`, `Region`, `RoleARN` | *required*, all three | |
 
+## pkg/hostaccess
+
+opkssh OIDC sign-in and OpenBAO-signed SSH host certificates for an EC2 host
+that is **not** a tailnet router (Amazon Linux 2023, arm64). `pkg/awsrouter`
+does this for routers from `router-setup.sh`; this package is the reusable
+part, with the same pinned artifacts, the same install steps and the same
+security posture. It imports no cloud SDK and no Pulumi.
+
+```go
+cfg := hostaccess.Config{
+    OPKSSH: hostaccess.NewOPKSSH(hostaccess.OPKSSHPreset{
+        Issuer: "https://idp.example.com/realms/ops", ClientID: "opkssh",
+        User: "ec2-user", Group: "ops",
+    }),
+    HostCert: hostaccess.NewHostCert(hostaccess.HostCertPreset{
+        Address: "https://openbao.example.internal", AuthMount: "aws", AuthRole: "host",
+        ServerIDHeader: "openbao.example.internal", SSHMount: "ssh-host", SSHRole: "host",
+        PrincipalPatterns: []string{"ip-10-68-*.eu-west-3.compute.internal"},
+    }),
+    // PrincipalSource empty is hostaccess.PrincipalIMDSHostname.
+}
+bundle, err := hostaccess.Render(cfg, hostaccess.Options{Version: "1.25.0"})
+files, err := bundle.WriteFilesYAML(hostaccess.EncodingPlain, 2) // under `write_files:`
+n, err := bundle.Size(hostaccess.EncodingPlain)                  // bytes added to user data
+```
+
+| Name | What |
+|---|---|
+| `Config{OPKSSH, HostCert, PrincipalSource}` | the inputs; at least one of the two features enabled. `OPKSSHConfig`, `HostCertConfig`, the presets, `NewOPKSSH`, `NewHostCert` and the pins are the ones `pkg/awsrouter` re-exports |
+| `Config.Validate()` | refuses a malformed digest, a URL with shell syntax, empty providers or identities, `root`, and principal patterns that can match outside one domain |
+| `Render(Config, Options) (*Bundle, error)` | `Options.Delivery` is `DeliveryDownload` (default; needs `Options.Version`, the release the module is pinned to) or `DeliveryInline` |
+| `Bundle.Packages` | install first: `checkpolicy` when opkssh is on (it compiles the SELinux module) |
+| `Bundle.Files` | `[]File{Path, Mode, Content}`: `/etc/hostaccess/hostaccess.env` (0600), `opkssh-providers`, `opkssh-auth_id` (0600), `hostcert-ca.pem` (0644, when set); the script itself (0755) when inline |
+| `Bundle.Commands` | the shell command(s) to run, as root, after the files are written; download-and-verify then run, or run |
+| `Bundle.WriteFilesYAML(enc, indent)` | the files as cloud-config `write_files` items; `EncodingGzipBase64` uses cloud-init's `gz+b64` |
+| `Bundle.Size(enc)` | the bytes the files and commands add to user data |
+| `SetupScript()`, `SetupSHA256()`, `SetupURL(v)`, `SetupAssetName(v)` | the script, its digest and its release-asset URL |
+
+**Principal.** `PrincipalIMDSHostname` reads IMDSv2 `local-hostname` (a PUT
+for a token, then the token on the GET), the EC2 private DNS name such as
+`ip-10-68-1-2.eu-west-3.compute.internal`, checks it is a plain DNS name, and
+passes it as `--principal`; `openbao-hostcert` checks it against the patterns
+again. `PrincipalTailscale` is the router's `tailscale status` lookup, and
+there the caller runs `/usr/local/sbin/openbao-hostcert-boot.sh` after the
+join.
+
+**Renewal.** With `imds-hostname` the first certificate is signed during
+setup, again at every boot (`openbao-hostcert-boot.service`, so a stopped and
+restarted host never waits on the timer) and every 12 hours with up to 10
+minutes of jitter (`openbao-hostcert.timer`). Bounded and fail-safe: three
+attempts of 45 s; on failure sshd keeps its plain host key and the timer
+retries.
+
+**Size.** The script is about 16 KB, so it is not inlined by default.
+Download delivery adds about 1.8 KB to user data (the files plus one
+`curl | sha256sum -c` command) and needs egress to github.com, as the opkssh
+artifacts do. `DeliveryInline` with `EncodingGzipBase64` adds about 9 KB;
+plain inline is about 20 KB and does not fit EC2's 16 KiB. Both numbers are
+asserted in `TestBundleSizes`.
+
+**Not touched.** This package does no firewalling and opens no port: the
+security group is the consumer's. It removes `ec2-instance-connect` (it would win over
+opkssh's `AuthorizedKeysCommand`) and, with opkssh on, writes
+`10-ssh-login.conf` (`AuthorizedKeysFile none`, no passwords): the EC2 key
+pair no longer logs in.
+
+**Shared with the routers.** `setup_opkssh`, `setup_ssh_login`, `fetch_verify`
+and the other opkssh helpers, the boot signer and the renewal timer are the
+same text in `hostaccess-setup.sh` and `router-setup.sh`;
+`TestSharedWithRouterSetup` fails when one changes without the other.
+
 ## pkg/awsrouter
 
 `awsrouter.CreateTailscaleInstance(ctx, logger, awsProvider, config)`
