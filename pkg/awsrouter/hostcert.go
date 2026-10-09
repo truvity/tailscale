@@ -76,9 +76,11 @@ func (c TailscaleInstanceConfig) hostCertCABundleLines() []string {
 // nil HostCert, or HostCert.Enabled false (the default): none of the
 // above runs, and the user data renders exactly as it did before this
 // input existed.
-// HostCertConfig is defined in pkg/hostaccess, which installs the same
-// openbao-hostcert on hosts that are not routers; this is an alias, so
-// existing callers compile unchanged.
+
+// HostCertConfig configures optional SSH host-certificate renewal. It is
+// defined in pkg/hostaccess, which installs the same openbao-hostcert on
+// hosts that are not routers; this is an alias, so existing callers
+// compile unchanged.
 type HostCertConfig = hostaccess.HostCertConfig
 
 // hostCertArch is the one GOARCH this package ever deploys — AL2023

@@ -377,7 +377,8 @@ func TestSetupInstallsOpksshAndHostCert(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o640), mode(t, filepath.Join(root, "etc/opk/auth_id")))
 	assert.Equal(t, "ec2-user oidc:groups:ops https://issuer.example.com/realms/ops\n", read(t, filepath.Join(root, "etc/opk/auth_id")))
 	assert.Equal(t, os.FileMode(0o600), mode(t, filepath.Join(root, "etc/openbao-hostcert/hostcert.env")))
-	assert.Contains(t, read(t, filepath.Join(root, "etc/openbao-hostcert/hostcert.env")), "OPENBAO_HOSTCERT_PRINCIPAL_PATTERNS=ip-10-68-*.eu-west-3.compute.internal\n")
+	hostcertEnv := read(t, filepath.Join(root, "etc/openbao-hostcert/hostcert.env"))
+	assert.Contains(t, hostcertEnv, "OPENBAO_HOSTCERT_PRINCIPAL_PATTERNS=ip-10-68-*.eu-west-3.compute.internal\n")
 	assert.Equal(t, "HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub\n", read(t, filepath.Join(root, "etc/ssh/sshd_config.d/70-hostcert.conf")))
 
 	timer := read(t, filepath.Join(root, "etc/systemd/system/openbao-hostcert.timer"))
