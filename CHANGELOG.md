@@ -5,6 +5,10 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## Unreleased
+
+- **Fixed: `golang.org/x/net` v0.60.0 and go1.27.2.** The module's `x/net` (v0.58.0) and the go1.27.1 toolchain carried GO-2026-6617, GO-2026-6612 and GO-2026-6613 (HTTP/2 and `net/http`); `govulncheck` failed on every build. Both are bumped, with the dependencies `go get` moved along. No API change.
+
 ## v1.24.0
 
 - **`pkg/awsrouter`: `FleetArgs.ExtraCIDRs`, more routes from one router fleet; `pkg/acl` and `pkg/mesh` approve them.** `ExtraCIDRs` lists further CIDRs the fleet advertises after `VPCCIDR`, for example a peered VPC reachable from the router's VPC. `DeployFleet` (and `ValidateRoutes`) refuse an entry that is not a CIDR or that repeats or overlaps `VPCCIDR` or another entry. `acl.Network.ExtraCIDRs` and `mesh.Network.ExtraCIDRs` carry the same list into the policy: each extra CIDR is auto-approved for the network router's tag (and for member clusters' routers on that network) and is a destination of the VPC tier next to `VPCCIDR`. Empty, the default, renders byte-identically to before; opt in by setting the field.
