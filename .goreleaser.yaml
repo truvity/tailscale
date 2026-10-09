@@ -29,3 +29,8 @@ release:
   extra_files:
     - glob: ./pkg/awsrouter/router-setup.sh
       name_template: "router-setup-v{{ .Version }}.sh"
+    # pkg/hostaccess's hostaccess-setup.sh, the same way: a host's user data
+    # downloads it by URL and pins the sha256 pkg/hostaccess computes from
+    # its go:embed of the same file.
+    - glob: ./pkg/hostaccess/hostaccess-setup.sh
+      name_template: "hostaccess-setup-v{{ .Version }}.sh"
