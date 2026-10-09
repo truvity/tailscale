@@ -130,8 +130,13 @@ func Render(c Config, o Options) (*Bundle, error) {
 		b.Packages = append(b.Packages, "checkpolicy")
 
 		op := c.OPKSSH
-		fmt.Fprintf(&env, "OPKSSH_ARTIFACT_VERSION=\"%s\"\nOPKSSH_ARTIFACT_URL=\"%s\"\nOPKSSH_ARTIFACT_SHA256=\"%s\"\nOPKSSH_SELINUX_URL=\"%s\"\nOPKSSH_SELINUX_SHA256=\"%s\"\n",
-			op.ArtifactVersion, op.ArtifactURL, op.ArtifactSHA256, op.SELinuxModuleURL, op.SELinuxModuleSHA256)
+		envLines(&env, [][2]string{
+			{"OPKSSH_ARTIFACT_VERSION", op.ArtifactVersion},
+			{"OPKSSH_ARTIFACT_URL", op.ArtifactURL},
+			{"OPKSSH_ARTIFACT_SHA256", op.ArtifactSHA256},
+			{"OPKSSH_SELINUX_URL", op.SELinuxModuleURL},
+			{"OPKSSH_SELINUX_SHA256", op.SELinuxModuleSHA256},
+		})
 
 		var providers, authIDs strings.Builder
 		for _, p := range op.Providers {
@@ -152,9 +157,19 @@ func Render(c Config, o Options) (*Bundle, error) {
 
 	if c.hostCertOn() {
 		h := c.HostCert
-		fmt.Fprintf(&env, "HOST_CERT_PRINCIPAL_SOURCE=\"%s\"\nHOST_CERT_ARTIFACT_VERSION=\"%s\"\nHOST_CERT_ARTIFACT_SHA256=\"%s\"\nHOST_CERT_ADDRESS=\"%s\"\nHOST_CERT_NAMESPACE=\"%s\"\nHOST_CERT_AUTH_MOUNT=\"%s\"\nHOST_CERT_AUTH_ROLE=\"%s\"\nHOST_CERT_SERVER_ID_HEADER=\"%s\"\nHOST_CERT_SSH_MOUNT=\"%s\"\nHOST_CERT_SSH_ROLE=\"%s\"\nHOST_CERT_PRINCIPAL_PATTERNS=\"%s\"\n",
-			c.principalSource(), h.ArtifactVersion, h.ArtifactSHA256[HostCertArch], h.Address, h.Namespace,
-			h.AuthMount, h.AuthRole, h.ServerIDHeader, h.SSHMount, h.SSHRole, strings.Join(h.PrincipalPatterns, ","))
+		envLines(&env, [][2]string{
+			{"HOST_CERT_PRINCIPAL_SOURCE", string(c.principalSource())},
+			{"HOST_CERT_ARTIFACT_VERSION", h.ArtifactVersion},
+			{"HOST_CERT_ARTIFACT_SHA256", h.ArtifactSHA256[HostCertArch]},
+			{"HOST_CERT_ADDRESS", h.Address},
+			{"HOST_CERT_NAMESPACE", h.Namespace},
+			{"HOST_CERT_AUTH_MOUNT", h.AuthMount},
+			{"HOST_CERT_AUTH_ROLE", h.AuthRole},
+			{"HOST_CERT_SERVER_ID_HEADER", h.ServerIDHeader},
+			{"HOST_CERT_SSH_MOUNT", h.SSHMount},
+			{"HOST_CERT_SSH_ROLE", h.SSHRole},
+			{"HOST_CERT_PRINCIPAL_PATTERNS", strings.Join(h.PrincipalPatterns, ",")},
+		})
 
 		if h.CABundle != "" {
 			b.Files = append(b.Files, File{ConfDir + "/hostcert-ca.pem", "0644", strings.TrimRight(h.CABundle, "\n") + "\n"})
@@ -175,6 +190,14 @@ func Render(c Config, o Options) (*Bundle, error) {
 	}
 
 	return b, nil
+}
+
+// envLines writes KEY="value" lines; Validate has already refused any value
+// with a quote, a dollar sign or a backtick.
+func envLines(w *strings.Builder, kv [][2]string) {
+	for _, e := range kv {
+		fmt.Fprintf(w, "%s=\"%s\"\n", e[0], e[1])
+	}
 }
 
 type cloudFile struct {
