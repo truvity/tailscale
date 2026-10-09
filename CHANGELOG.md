@@ -5,6 +5,10 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.24.2
+
+- Dependency updates.
+
 ## v1.24.1
 
 - **Fixed: `golang.org/x/net` v0.60.0 and go1.27.2.** The module's `x/net` (v0.58.0) and the go1.27.1 toolchain carried GO-2026-6617, GO-2026-6612 and GO-2026-6613 (HTTP/2 and `net/http`); `govulncheck` failed on every build. Both are bumped, with the dependencies `go get` moved along. No API change.
