@@ -26,12 +26,12 @@ package tailnet
 
 import (
 	"fmt"
-	"net"
-	"regexp"
 	"time"
 
 	"github.com/pulumi/pulumi-tailscale/sdk/go/tailscale"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+
+	"github.com/truvity/tailscale/pkg/tailnetspec"
 )
 
 // DefaultKeyExpiry bounds a router key's life. The stack must apply at
@@ -143,36 +143,19 @@ func NewS3FlowLogs(ctx *pulumi.Context, name string, cfg S3FlowLogs, opts ...pul
 	return nil
 }
 
+// The address and DNS-suffix rules live in pkg/tailnetspec, which links no
+// Pulumi or Tailscale SDK; they are re-exported here so existing callers
+// keep compiling. A caller that only computes an address or checks a suffix
+// should import pkg/tailnetspec directly.
+
 // ServiceIP returns base+offset inside a service CIDR — the pinned-IP
 // conventions a tailnet leans on (a DNS gateway at .0.53, the cluster
-// resolver at .0.10) without anyone hand-writing addresses.
+// resolver at .0.10) without anyone hand-writing addresses. See
+// tailnetspec.ServiceIP.
 func ServiceIP(serviceCIDR string, offset uint32) (string, error) {
-	ip, ipNet, err := net.ParseCIDR(serviceCIDR)
-	if err != nil {
-		return "", fmt.Errorf("parse service cidr %q: %w", serviceCIDR, err)
-	}
-
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return "", fmt.Errorf("service cidr %q is not IPv4", serviceCIDR)
-	}
-
-	val := uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3]) + offset
-
-	result := net.IPv4(byte(val>>24), byte(val>>16), byte(val>>8), byte(val))
-	if !ipNet.Contains(result) {
-		return "", fmt.Errorf("ip %s (offset %d) is outside service cidr %s", result, offset, serviceCIDR)
-	}
-
-	return result.String(), nil
+	return tailnetspec.ServiceIP(serviceCIDR, offset)
 }
-
-// magicDNSSuffixPattern is one DNS label under ts.net: Tailscale's own
-// `tail<hex>` default, or a customized tailnet DNS name.
-var magicDNSSuffixPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?\.ts\.net$`)
 
 // ValidMagicDNSSuffix reports whether s is a tailnet's MagicDNS suffix: a
-// single DNS label under ts.net (`tail1234.ts.net`, `my-net.ts.net`).
-func ValidMagicDNSSuffix(s string) bool {
-	return magicDNSSuffixPattern.MatchString(s)
-}
+// single DNS label under ts.net. See tailnetspec.ValidMagicDNSSuffix.
+func ValidMagicDNSSuffix(s string) bool { return tailnetspec.ValidMagicDNSSuffix(s) }
