@@ -7,6 +7,8 @@ together at every version.
 
 ## Unreleased
 
+## v1.25.0
+
 - **`pkg/tailnetspec` (new): `ServiceIP` and `ValidMagicDNSSuffix` without the SDKs.** The two pure rules move to a package that imports the standard library only, so a config layer that only computes a pinned service address or checks a MagicDNS suffix no longer links Pulumi and `pulumi-tailscale`. `pkg/tailnet` re-exports both unchanged; a test fails if `pkg/tailnetspec` ever gains a non-standard-library import. Additive, nothing existing changes.
 
 ## v1.24.2
