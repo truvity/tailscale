@@ -7,6 +7,8 @@ together at every version.
 
 ## Unreleased
 
+## v1.26.0
+
 - **`pkg/awsrouterspec` (new): `InstanceRoleName` and `HostnamePatterns` without the SDKs.** The two pure naming rules of a router fleet move to a package that imports the standard library only, so a config layer that only computes a fleet's role name or its known_hosts patterns no longer links Pulumi and `pulumi-aws`. `pkg/awsrouter` keeps both as thin wrappers with unchanged behavior and error text; a test fails if `pkg/awsrouterspec` ever gains a non-standard-library import. Additive, nothing existing changes.
 
 ## v1.25.1
