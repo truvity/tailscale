@@ -7,6 +7,10 @@ together at every version.
 
 ## Unreleased
 
+## v1.26.2
+
+- Dependency updates.
+
 ## v1.26.1
 
 - Dependency updates.
