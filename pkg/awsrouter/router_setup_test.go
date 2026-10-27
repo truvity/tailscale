@@ -948,9 +948,11 @@ func TestJoinScriptNeverPrintsTheAuthKey(t *testing.T) {
 // and continues once it is.
 func TestJoinScriptWaitsUntilTheNodeIsOnline(t *testing.T) {
 	counter := filepath.Join(t.TempDir(), "polls")
-	ts := strings.Replace(joinTailscaleStub, `status) echo '{"BackendState":"Running","Self":{"Online":true}}' ;;`,
+	online := `{"BackendState":"Running","Self":{"Online":true}}`
+	starting := `{"BackendState":"Starting","Self":{"Online":false}}`
+	ts := strings.Replace(joinTailscaleStub, `status) echo '`+online+`' ;;`,
 		`status) n=$(cat `+shellQuote(counter)+` 2>/dev/null || echo 0); echo $((n+1)) > `+shellQuote(counter)+`;
-    if [ "$n" -ge 2 ]; then echo '{"BackendState":"Running","Self":{"Online":true}}'; else echo '{"BackendState":"Starting","Self":{"Online":false}}'; fi ;;`, 1)
+    if [ "$n" -ge 2 ]; then echo '`+online+`'; else echo '`+starting+`'; fi ;;`, 1)
 	require.NotEqual(t, joinTailscaleStub, ts)
 
 	out, calls, ok := runJoin(t, joinRun{tailscale: ts})
