@@ -7,8 +7,6 @@ together at every version.
 
 ## Unreleased
 
-## v1.28.0
-
 What the router fleet does when it restarts, and what it no longer creates. Rolling it replaces every router once: the join script is part of the user data, so the launch template gets a new version.
 
 - **A refresh never leaves a VPC without a router.** The group's instance refresh keeps 100% healthy and may run up to 200% (`MinHealthyPercentage` 100, `MaxHealthyPercentage` 200) for every fleet, where it kept 0% for one router and 50% for more. The replacement launches first, and the old router ends only when the replacement is InService: it has joined the tailnet and completed the launch hook. The warm-up stays 300 seconds. Room for the extra instance: `Max` is now at least `Desired + 1` (it already defaulted to that); a fleet that set `Max` equal to `Desired` gets `Desired + 1`, and a warm pool, which is capped at `Max`, holds one more stopped instance.
