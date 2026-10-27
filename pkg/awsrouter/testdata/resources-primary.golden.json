@@ -1,0 +1,283 @@
+[
+  {
+    "inputs": {
+      "desiredCapacity": 1,
+      "instanceRefresh": {
+        "preferences": {
+          "instanceWarmup": "300",
+          "minHealthyPercentage": 0
+        },
+        "strategy": "Rolling",
+        "triggers": [
+          "launch_template"
+        ]
+      },
+      "launchTemplate": {
+        "id": "tailscale-lt-id",
+        "version": "7"
+      },
+      "maxSize": 2,
+      "minSize": 1,
+      "name": "example-tailscale-acme",
+      "tags": [
+        {
+          "key": "Environment",
+          "propagateAtLaunch": true,
+          "value": "example"
+        },
+        {
+          "key": "ManagedBy",
+          "propagateAtLaunch": true,
+          "value": "pulumi"
+        },
+        {
+          "key": "Name",
+          "propagateAtLaunch": true,
+          "value": "example-tailscale-acme"
+        }
+      ],
+      "vpcZoneIdentifiers": [
+        "subnet-0123456789abcdef0",
+        "subnet-0123456789abcdef1"
+      ],
+      "warmPool": {
+        "maxGroupPreparedCapacity": 2,
+        "minSize": 1,
+        "poolState": "Stopped"
+      }
+    },
+    "name": "tailscale-asg",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:autoscaling/group:Group"
+  },
+  {
+    "inputs": {
+      "autoscalingGroupName": "example-tailscale-acme",
+      "defaultResult": "ABANDON",
+      "heartbeatTimeout": 900,
+      "lifecycleTransition": "autoscaling:EC2_INSTANCE_LAUNCHING",
+      "name": "example-tailscale-acme-launch"
+    },
+    "name": "tailscale-lifecycle-hook",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:autoscaling/lifecycleHook:LifecycleHook"
+  },
+  {
+    "inputs": {
+      "alarmDescription": "Tailscale router CPU \u003e 90% for 15 minutes",
+      "comparisonOperator": "GreaterThanThreshold",
+      "dimensions": {
+        "AutoScalingGroupName": "example-tailscale-acme"
+      },
+      "evaluationPeriods": 3,
+      "metricName": "CPUUtilization",
+      "name": "example-tailscale-acme-cpu-high",
+      "namespace": "AWS/EC2",
+      "period": 300,
+      "statistic": "Average",
+      "tags": {
+        "Environment": "example",
+        "ManagedBy": "pulumi",
+        "Name": "example-tailscale-acme-cpu-high"
+      },
+      "threshold": 90
+    },
+    "name": "tailscale-cpu-alarm",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:cloudwatch/metricAlarm:MetricAlarm"
+  },
+  {
+    "inputs": {
+      "alarmDescription": "Tailscale router instance status check failed",
+      "comparisonOperator": "GreaterThanThreshold",
+      "dimensions": {
+        "AutoScalingGroupName": "example-tailscale-acme"
+      },
+      "evaluationPeriods": 2,
+      "metricName": "StatusCheckFailed",
+      "name": "example-tailscale-acme-status-check",
+      "namespace": "AWS/EC2",
+      "period": 60,
+      "statistic": "Maximum",
+      "tags": {
+        "Environment": "example",
+        "ManagedBy": "pulumi",
+        "Name": "example-tailscale-acme-status-check"
+      },
+      "threshold": 0
+    },
+    "name": "tailscale-status-alarm",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:cloudwatch/metricAlarm:MetricAlarm"
+  },
+  {
+    "inputs": {
+      "blockDeviceMappings": [
+        {
+          "deviceName": "/dev/xvda",
+          "ebs": {
+            "deleteOnTermination": "true",
+            "encrypted": "true",
+            "volumeSize": 8,
+            "volumeType": "gp3"
+          }
+        }
+      ],
+      "iamInstanceProfile": {
+        "arn": ""
+      },
+      "imageId": "ami-0123456789abcdef0",
+      "instanceType": "t4g.micro",
+      "metadataOptions": {
+        "httpEndpoint": "enabled",
+        "httpPutResponseHopLimit": 2,
+        "httpTokens": "required"
+      },
+      "name": "example-tailscale-acme",
+      "networkInterfaces": [
+        {
+          "associatePublicIpAddress": "true",
+          "deviceIndex": 0,
+          "securityGroups": [
+            "tailscale-sg-id"
+          ]
+        }
+      ],
+      "tagSpecifications": [
+        {
+          "resourceType": "instance",
+          "tags": {
+            "Environment": "example",
+            "ManagedBy": "pulumi",
+            "Name": "example-tailscale-acme"
+          }
+        }
+      ],
+      "tags": {
+        "Environment": "example",
+        "ManagedBy": "pulumi",
+        "Name": "example-tailscale-acme"
+      },
+      "updateDefaultVersion": true,
+      "userData": "sha256:77a91ed2fe1d03b977b7248c5143d0ef971fa12637a032403d749a5c1305b1c8"
+    },
+    "name": "tailscale-lt",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:ec2/launchTemplate:LaunchTemplate"
+  },
+  {
+    "inputs": {
+      "description": "Tailscale subnet router - WireGuard UDP ingress, SSM access",
+      "name": "example-tailscale-acme",
+      "tags": {
+        "Environment": "example",
+        "ManagedBy": "pulumi",
+        "Name": "example-tailscale-acme"
+      },
+      "vpcId": "vpc-0123456789abcdef0"
+    },
+    "name": "tailscale-sg",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:ec2/securityGroup:SecurityGroup"
+  },
+  {
+    "inputs": {
+      "cidrBlocks": [
+        "0.0.0.0/0"
+      ],
+      "description": "All outbound",
+      "fromPort": 0,
+      "protocol": "-1",
+      "securityGroupId": "tailscale-sg-id",
+      "toPort": 0,
+      "type": "egress"
+    },
+    "name": "tailscale-sg-egress-all",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:ec2/securityGroupRule:SecurityGroupRule"
+  },
+  {
+    "inputs": {
+      "cidrBlocks": [
+        "0.0.0.0/0"
+      ],
+      "description": "Tailscale WireGuard",
+      "fromPort": 41641,
+      "protocol": "udp",
+      "securityGroupId": "tailscale-sg-id",
+      "toPort": 41641,
+      "type": "ingress"
+    },
+    "name": "tailscale-sg-ingress-wireguard",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:ec2/securityGroupRule:SecurityGroupRule"
+  },
+  {
+    "inputs": {
+      "name": "example-tailscale-acme",
+      "role": "example-tailscale-acme",
+      "tags": {
+        "Environment": "example",
+        "ManagedBy": "pulumi",
+        "Name": "example-tailscale-acme"
+      }
+    },
+    "name": "tailscale-instance-profile",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:iam/instanceProfile:InstanceProfile"
+  },
+  {
+    "inputs": {
+      "assumeRolePolicy": "{\"Statement\":[{\"Action\":\"sts:AssumeRole\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"}}],\"Version\":\"2012-10-17\"}",
+      "inlinePolicies": [
+        {
+          "name": "ssm-auth-key",
+          "policy": "{\"Statement\":[{\"Action\":[\"ssm:GetParameter\",\"ssm:GetParameters\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:ssm:eu-west-1:@ACCOUNT@:parameter/tailscale/acme/auth-key\"}],\"Version\":\"2012-10-17\"}"
+        },
+        {
+          "name": "kms-decrypt-ssm",
+          "policy": "{\"Statement\":[{\"Action\":[\"kms:Decrypt\"],\"Condition\":{\"ForAnyValue:StringEquals\":{\"kms:ResourceAliases\":\"alias/aws/ssm\"}},\"Effect\":\"Allow\",\"Resource\":\"arn:aws:kms:eu-west-1:@ACCOUNT@:key/*\"}],\"Version\":\"2012-10-17\"}"
+        },
+        {
+          "name": "ec2-source-dest-check",
+          "policy": "{\"Statement\":[{\"Action\":[\"ec2:ModifyInstanceAttribute\",\"ec2:DescribeInstances\"],\"Effect\":\"Allow\",\"Resource\":\"*\"}],\"Version\":\"2012-10-17\"}"
+        },
+        {
+          "name": "asg-lifecycle-hook",
+          "policy": "{\"Statement\":[{\"Action\":[\"autoscaling:CompleteLifecycleAction\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:autoscaling:eu-west-1:@ACCOUNT@:autoScalingGroup:*:autoScalingGroupName/example-tailscale-acme\"}],\"Version\":\"2012-10-17\"}"
+        }
+      ],
+      "name": "example-tailscale-acme",
+      "permissionsBoundary": "arn:aws:iam::@ACCOUNT@:policy/example-boundary",
+      "tags": {
+        "Environment": "example",
+        "ManagedBy": "pulumi",
+        "Name": "example-tailscale-acme"
+      }
+    },
+    "name": "tailscale-role",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "pulumi:providers:aws::aws",
+    "type": "aws:iam/role:Role"
+  },
+  {
+    "inputs": {
+      "region": "eu-west-1",
+      "skipCredentialsValidation": false,
+      "skipRegionValidation": true
+    },
+    "name": "aws",
+    "parent": "pulumi:pulumi:Stack::p-s",
+    "provider": "",
+    "type": "pulumi:providers:aws"
+  }
+]
