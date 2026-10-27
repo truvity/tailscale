@@ -50,14 +50,18 @@ func (m *providerGuardMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMa
 	m.mu.Unlock()
 
 	// Enough keys to satisfy every invoke this package makes today
-	// (aws.GetCallerIdentity, ec2.LookupAmi); unused keys are ignored by
-	// the caller's result struct.
+	// (aws.GetCallerIdentity, ec2.LookupAmi, and aws.GetRegion inside the
+	// asg box); unused keys are ignored by the caller's result struct.
 	return resource.NewPropertyMapFromMap(map[string]interface{}{
 		"id":             "ami-0123456789abcdef0",
 		"rootDeviceName": "/dev/xvda",
-		"accountId":      "example-account",
-		"arn":            "arn:aws:iam::example-account:root",
-		"userId":         "AIDACKCEVSQ6C2EXAMPLE",
+		// Twelve digits, as an ARN needs (the asg box validates the
+		// boundary's), built at run time: see rsAccount.
+		"accountId": rsAccount,
+		"arn":       "arn:aws:iam::" + rsAccount + ":root",
+		"userId":    "AIDACKCEVSQ6C2EXAMPLE",
+		"region":    "eu-west-1",
+		"name":      "eu-west-1",
 	}), nil
 }
 
@@ -74,8 +78,8 @@ func awsRouterTestConfig() TailscaleInstanceConfig {
 
 // TestCreateTailscaleInstanceInvokesAreScoped runs the package's full
 // resource graph — including both invokes it makes (the caller-identity
-// lookup in createTailscaleInstanceProfile and the AMI lookup in
-// createTailscaleLaunchTemplate) — under providerGuardMocks. It must
+// lookup and the AMI lookup in CreateTailscaleInstance, and the region
+// and account lookups inside the asg box) — under providerGuardMocks. It must
 // succeed: every invoke in this package passes the same explicit AWS
 // provider its resources use.
 func TestCreateTailscaleInstanceInvokesAreScoped(t *testing.T) {
@@ -160,7 +164,7 @@ func TestLaunchTemplateRootVolume(t *testing.T) {
 }
 
 func TestRootBlockDeviceNeedsADeviceName(t *testing.T) {
-	_, err := rootBlockDevice("", RootVolumeConfig{})
+	_, err := rootVolume("", RootVolumeConfig{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no root device name")
 }

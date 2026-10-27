@@ -7,6 +7,8 @@ together at every version.
 
 ## Unreleased
 
+- **`pkg/awsrouter` builds the fleet with [`github.com/truvity/asg`](https://github.com/truvity/asg).** The security group, its two rules, the role and instance profile, the launch template, the Auto Scaling group and its launch hook are now one `asg.New` box; the two CloudWatch alarms stay this package's own. Every resource keeps its logical name, physical name, parent and inputs (`Compat.Flat`, `Compat.Names`, `Compat.LaunchTemplateTagTypes`, `Compat.AssumeRolePolicy`), and the user data is unchanged, so the launch template keeps its version and nothing is refreshed or replaced. The one difference a preview shows is an in-place update of each Auto Scaling group: `waitForCapacityTimeout` `"0"`, which exists only in the provider and calls no AWS API, plus `healthCheckType` `EC2` and `healthCheckGracePeriod` 300, the values every group already has. `testdata/handbuilt/` keeps the resource set the hand-built fleet asked for, and `TestStepAKeepsTheHandBuiltResourceSet` holds the new one to it. The module now requires `pulumi-aws` v7.48.0 and the Pulumi SDK v3.264.0 (from `github.com/truvity/asg`).
+
 ## v1.26.2
 
 - Dependency updates.

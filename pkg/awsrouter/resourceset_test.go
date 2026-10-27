@@ -20,10 +20,11 @@ import (
 
 // The resource-set goldens (testdata/resources-*.golden.json) are what a
 // fleet asks the AWS provider for, under Pulumi mocks: every resource's
-// type, logical name, parent, provider and inputs. They were recorded
-// from the hand-built fleet (v1.26.2) before it moved onto
-// github.com/truvity/asg, so a test that compares the fleet with them is
-// the proof that a stack's next preview replaces nothing.
+// type, logical name, parent, provider and inputs. testdata/handbuilt/
+// holds the same record taken from the hand-built fleet of v1.26.2, before
+// it moved onto github.com/truvity/asg; it is never regenerated, and
+// TestStepAKeepsTheHandBuiltResourceSet compares the fleet with it: the
+// proof that a stack's next preview replaces nothing.
 //
 // This repository is public: the mocked account id is built at run time
 // and written to the goldens as a placeholder, and the user-data, which
@@ -92,7 +93,7 @@ func (m *resourceSetMocks) NewResource(args pulumi.MockResourceArgs) (string, re
 	return args.Name + "-id", out, nil
 }
 
-func (m *resourceSetMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+func (m *resourceSetMocks) Call(_ pulumi.MockCallArgs) (resource.PropertyMap, error) {
 	return resource.NewPropertyMapFromMap(map[string]any{
 		"id":             "ami-0123456789abcdef0",
 		"rootDeviceName": "/dev/xvda",
@@ -213,6 +214,56 @@ func TestResourceSetIsPinned(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got := recordResourceSet(t, c).dump(t)
 			require.Equal(t, resourceSetGolden(t, name, got), got)
+		})
+	}
+}
+
+// stepADelta is everything the move onto github.com/truvity/asg adds to
+// the hand-built resource set: three inputs of the Auto Scaling group,
+// and nothing else. healthCheckType EC2 and healthCheckGracePeriod 300
+// are the values every live group already has (AWS's and the provider's
+// defaults), so they plan no change; waitForCapacityTimeout "0" (asg
+// v0.4.2) exists only in the provider, so it is an in-place update of the
+// state that calls no AWS API and starts no refresh.
+var stepADelta = map[string]map[string]any{
+	"aws:autoscaling/group:Group": {
+		"healthCheckGracePeriod": float64(300),
+		"healthCheckType":        "EC2",
+		"waitForCapacityTimeout": "0",
+	},
+}
+
+// TestStepAKeepsTheHandBuiltResourceSet: the same resources (type, logical
+// name, parent, provider) as the hand-built fleet, every input the same,
+// except stepADelta's added group inputs.
+func TestStepAKeepsTheHandBuiltResourceSet(t *testing.T) {
+	for name, c := range resourceSetCases(t) {
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", "handbuilt", "resources-"+name+".json"))
+			require.NoError(t, err)
+
+			var old, now []map[string]any
+			require.NoError(t, json.Unmarshal(raw, &old))
+			require.NoError(t, json.Unmarshal([]byte(recordResourceSet(t, c).dump(t)), &now))
+			require.Len(t, now, len(old), "the resource count changed")
+
+			for i := range old {
+				for _, k := range []string{"type", "name", "parent", "provider"} {
+					require.Equal(t, old[i][k], now[i][k], "resource %d: %s", i, k)
+				}
+
+				typ := old[i]["type"].(string)
+				oldIn := old[i]["inputs"].(map[string]any)
+				nowIn := now[i]["inputs"].(map[string]any)
+
+				for k, v := range stepADelta[typ] {
+					require.NotContains(t, oldIn, k, "%s %s: the hand-built fleet already set %s", typ, old[i]["name"], k)
+					require.Equal(t, v, nowIn[k], "%s %s: %s", typ, old[i]["name"], k)
+					delete(nowIn, k)
+				}
+
+				require.Equal(t, oldIn, nowIn, "%s %s: inputs", typ, old[i]["name"])
+			}
 		})
 	}
 }
