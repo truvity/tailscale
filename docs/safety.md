@@ -172,8 +172,9 @@ needed. cloud-init and the join script both write there, one line per attempt:
 aws ec2 get-console-output --latest --output text --instance-id i-0123456789abcdef0
 ```
 
-A router that never joins does not complete its lifecycle action, so the ASG
-abandons it after 15 minutes and launches another. Read the console output
+A router that cannot join abandons its own lifecycle action after ten minutes of
+retries (the ASG would abandon it after 15 anyway) and the ASG launches
+another. Read the console output
 before then, or from the next attempt, which fails the same way.
 
 **Repair by replacing it**, never by logging in and fixing it. The ASG launches

@@ -35,8 +35,6 @@ import (
 	"text/template"
 
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws"
-	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/autoscaling"
-	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/cloudwatch"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/ec2"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
@@ -347,10 +345,11 @@ func (c TailscaleInstanceConfig) baseName() string {
 // security group, IAM role + instance profile, launch template, and ASG.
 //
 // The security group, the role and its profile, the launch template, the
-// group and its launch hook are one github.com/truvity/asg box (fleetBox);
-// the two CloudWatch alarms are this package's own. Every resource keeps
-// the logical name, the physical name and the inputs it had before the
-// library, so moving a stack onto this version replaces nothing.
+// group and its launch hook are one github.com/truvity/asg box (fleetBox).
+// Every resource keeps the logical name and the physical name it had before
+// the library, so moving a stack onto this version replaces nothing. The
+// two CloudWatch alarms the fleet used to have are gone: monitoring is the
+// estate's own.
 func CreateTailscaleInstance(
 	c *pulumi.Context,
 	logger *slog.Logger,
@@ -418,10 +417,6 @@ func CreateTailscaleInstance(
 	box, err := asg.New(c, config.resourceName("tailscale"), args, pulumi.Provider(awsProvider))
 	if err != nil {
 		return nil, fmt.Errorf("create Tailscale router box: %w", err)
-	}
-
-	if err := createTailscaleAlarms(c, awsProvider, config, box.Group); err != nil {
-		return nil, err
 	}
 
 	logger.InfoContext(ctx, "Tailscale subnet router instance created successfully",
@@ -519,14 +514,17 @@ func fleetBox(config TailscaleInstanceConfig, awsProvider *aws.Provider, account
 		// unit completes. A separate resource, as it always was.
 		Hook:     &asg.HookArgs{Mode: asg.HookSeparate, HeartbeatTimeoutSeconds: 900, DefaultResult: "ABANDON"},
 		WarmPool: warmPool,
+		// A refresh launches the replacement router first and ends the old
+		// one only after the replacement is InService, which it is only once
+		// it has joined the tailnet and completed the launch hook: a VPC is
+		// never without a router while the fleet restarts. No trigger is
+		// named; Auto Scaling refreshes on every launch template version
+		// anyway.
 		Refresh: &asg.RefreshArgs{
-			MinHealthyPercentage: sizes.minHealthy,
+			MinHealthyPercentage: refreshMinHealthyPercentage,
+			MaxHealthyPercentage: refreshMaxHealthyPercentage,
 			// 5 min — Tailscale needs time to connect and advertise routes.
 			WarmupSeconds: 300,
-			// Redundant: Auto Scaling refreshes on every launch template
-			// version anyway, and Pulumi warns about it. Kept so this
-			// version changes nothing in a live group.
-			Triggers: []string{"launch_template"},
 		},
 		IAM: asg.IAMArgs{
 			PermissionsBoundary: pbARN,
@@ -570,22 +568,28 @@ func fleetBox(config TailscaleInstanceConfig, awsProvider *aws.Provider, account
 	}, nil
 }
 
+// The rolling instance refresh keeps every router in service until its
+// replacement is InService: it may launch up to twice the desired capacity
+// before it ends an old router, and never drops below the desired capacity.
+const (
+	refreshMinHealthyPercentage = 100
+	refreshMaxHealthyPercentage = 200
+)
+
 // fleetSizes is the group's sizing after this package's defaults.
 type fleetSizes struct {
 	min, desired, max int
-	// minHealthy is the refresh's MinHealthyPercentage: 0 for one
-	// router, 50 for two or more.
-	minHealthy int
 }
 
+// sizes applies the defaults. Max is at least Desired+1: a refresh that
+// launches the replacement before it ends the old router needs room for one
+// extra instance, and a group at its maximum could not start one. (The warm
+// pool is sized from the maximum, so a Max equal to Desired also gains one
+// stopped instance.)
 func (c TailscaleInstanceConfig) sizes() fleetSizes {
 	s := fleetSizes{min: max(c.Min, 1), desired: max(c.Desired, 1), max: c.Max}
-	if s.max < s.desired {
+	if s.max < s.desired+1 {
 		s.max = s.desired + 1
-	}
-
-	if s.desired > 1 {
-		s.minHealthy = 50
 	}
 
 	return s
@@ -716,72 +720,4 @@ func buildTailscaleUserData(config TailscaleInstanceConfig) string {
 	}
 
 	return buf.String()
-}
-
-// ── CloudWatch alarms ───────────────────────────────────────────────────────
-
-// createTailscaleAlarms are the two CloudWatch alarms on the group, this
-// package's own rather than the library's (whose alarms are deprecated),
-// with the inputs they always had.
-func createTailscaleAlarms(
-	c *pulumi.Context,
-	awsProvider *aws.Provider,
-	config TailscaleInstanceConfig,
-	group *autoscaling.Group,
-) error {
-	env := config.Environment
-
-	// CloudWatch alarms: sustained high CPU and a failed instance status
-	// check, so the router's CPU and health are monitored where AWS
-	// records them. They carry no AlarmActions: where an alarm notifies
-	// is the caller's decision, and an SNS topic in another account needs
-	// cross-account IAM this module does not own. A caller routes them
-	// from CloudWatch (or replaces them with its own alerting).
-	_, err := cloudwatch.NewMetricAlarm(c, config.resourceName("tailscale-cpu-alarm"), &cloudwatch.MetricAlarmArgs{
-		Name:               pulumi.String(config.baseName() + "-cpu-high"),
-		ComparisonOperator: pulumi.String("GreaterThanThreshold"),
-		EvaluationPeriods:  pulumi.Int(3),
-		MetricName:         pulumi.String("CPUUtilization"),
-		Namespace:          pulumi.String("AWS/EC2"),
-		Period:             pulumi.Int(300),
-		Statistic:          pulumi.String("Average"),
-		Threshold:          pulumi.Float64(90),
-		AlarmDescription:   pulumi.String("Tailscale router CPU > 90% for 15 minutes"),
-		Dimensions: pulumi.StringMap{
-			"AutoScalingGroupName": group.Name,
-		},
-		Tags: pulumi.StringMap{
-			TagName:        pulumi.String(config.baseName() + "-cpu-high"),
-			TagEnvironment: pulumi.String(env),
-			TagManagedBy:   pulumi.String(TagValuePulumi),
-		},
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return fmt.Errorf("create Tailscale CPU alarm: %w", err)
-	}
-
-	_, err = cloudwatch.NewMetricAlarm(c, config.resourceName("tailscale-status-alarm"), &cloudwatch.MetricAlarmArgs{
-		Name:               pulumi.String(config.baseName() + "-status-check"),
-		ComparisonOperator: pulumi.String("GreaterThanThreshold"),
-		EvaluationPeriods:  pulumi.Int(2),
-		MetricName:         pulumi.String("StatusCheckFailed"),
-		Namespace:          pulumi.String("AWS/EC2"),
-		Period:             pulumi.Int(60),
-		Statistic:          pulumi.String("Maximum"),
-		Threshold:          pulumi.Float64(0),
-		AlarmDescription:   pulumi.String("Tailscale router instance status check failed"),
-		Dimensions: pulumi.StringMap{
-			"AutoScalingGroupName": group.Name,
-		},
-		Tags: pulumi.StringMap{
-			TagName:        pulumi.String(config.baseName() + "-status-check"),
-			TagEnvironment: pulumi.String(env),
-			TagManagedBy:   pulumi.String(TagValuePulumi),
-		},
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return fmt.Errorf("create Tailscale status check alarm: %w", err)
-	}
-
-	return nil
 }

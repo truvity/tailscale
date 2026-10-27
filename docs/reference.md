@@ -307,8 +307,8 @@ func routerFleet(
 | `SSMAuthKeyPath` | *required* | the SSM parameter holding the auth key, read at boot; a SecureString under the default `aws/ssm` key |
 | `Min` | `1` | below 1 becomes 1 |
 | `Desired` | `1` | below 1 becomes 1 |
-| `Max` | `Desired + 1` | used when it is at least `Desired` |
-| `WarmPool` | `false` | a warm pool of stopped, already-joined instances, `Desired` of them, capped at `Max` |
+| `Max` | `Desired + 1` | used when it is at least `Desired + 1`; below that it becomes `Desired + 1`, because a refresh launches a replacement router before it ends the old one and needs room for one more |
+| `WarmPool` | `false` | a warm pool of stopped instances, `Desired` of them, capped at `Max`; an instance that starts out of the pool joins the tailnet again before it goes into service |
 | `PermissionsBoundaryName` | `""` (none) | the name of an IAM policy in the fleet's own account, attached as the role's permissions boundary |
 | `TrustedUserCAKeys` | empty (off) | OpenSSH user-CA public keys, one `authorized_keys`-format line each, written to `/etc/ssh/trusted-user-ca-keys.pub`. Requires `AuthorizedPrincipals`. Empty with `OPKSSH` set: no CA trusted, the same SSH lockdown |
 | `AuthorizedPrincipals` | empty (off) | login user → the certificate principals that may log in as it, written to `/etc/ssh/authorized_principals/<user>`. Requires `TrustedUserCAKeys` |
@@ -362,7 +362,7 @@ The result, `*TailscaleInstanceResult`, carries `SecurityGroupID`,
 
 ### What it creates
 
-All but the alarms are one [`github.com/truvity/asg`](https://github.com/truvity/asg)
+All of it is one [`github.com/truvity/asg`](https://github.com/truvity/asg)
 box (`asg.New`), declared with the logical and physical names the fleet had
 before it used the library, so a stack that moves to it replaces nothing.
 
@@ -371,9 +371,8 @@ before it used the library, so a stack that moves to it replaces nothing.
 | security group | ingress UDP 41641 (WireGuard) from anywhere, egress everything; **no TCP port** |
 | IAM role and instance profile | trusted by EC2; four inline policies and nothing else: `ssm:GetParameter(s)` on the one `SSMAuthKeyPath` parameter; `kms:Decrypt` on keys aliased `alias/aws/ssm`; `ec2:ModifyInstanceAttribute` and `ec2:DescribeInstances` (to turn off the source/destination check on itself); `autoscaling:CompleteLifecycleAction` on its own ASG. No managed policy |
 | launch template | the newest Amazon Linux 2023 arm64 image (see below), `t4g.micro`, the `RootVolume` root EBS volume (8 GiB `gp3`, encrypted, by default), a public address, IMDSv2 required with hop limit 2, the cloud-init user data; each change is a new default version |
-| auto-scaling group | the sizes above; a rolling instance refresh on every launch-template change, keeping 0% healthy for one instance and 50% for more, with a 300-second warm-up; optional warm pool (`Stopped`) |
+| auto-scaling group | the sizes above; a rolling instance refresh on every launch-template change that launches the replacement first (minimum healthy 100%, maximum healthy 200%, a 300-second warm-up), so a VPC never loses its last router; optional warm pool (`Stopped`) |
 | lifecycle hook | `<name>-launch` on launch: a router is in service only after it has joined; no signal in 900 seconds abandons it |
-| CloudWatch alarms | CPU above 90% for 15 minutes, and a failed status check; no actions attached |
 
 ### The image lookup
 
@@ -435,10 +434,15 @@ optional features:
   from `SSMAuthKeyPath`, runs
   `tailscale up --advertise-routes=… --accept-dns=false`, signs the first
   SSH host certificate when `HOST_CERT=true` (below), turns off the
-  source/destination check and completes the lifecycle action — retrying 20
-  times, 15 seconds apart. On a later boot (already joined, e.g. a warm-pool
-  instance starting into service) it signs again, then completes the
-  lifecycle action. Its output goes to `/var/log/tailscale-join.log`
+  source/destination check and completes the lifecycle action `CONTINUE`.
+  It does the same on every boot, a warm-pool instance starting into service
+  included: its ephemeral tailnet node is gone after weeks stopped, so it
+  runs `tailscale up` again with the key and flags of the first boot, waits
+  (at most a minute) until `tailscale status` shows the node online and its
+  preferences advertise every route, and only then signs and completes. It
+  retries for ten minutes, 15 seconds apart; a join that never works
+  completes the action `ABANDON`, and Auto Scaling replaces the instance.
+  The key is never logged. Its output goes to `/var/log/tailscale-join.log`
   and to the serial console;
 - when `SSH_USER_CA=true` or `OPKSSH=true` — either login path, or both:
   the SSH login lockdown, `/etc/ssh/sshd_config.d/10-ssh-login.conf`

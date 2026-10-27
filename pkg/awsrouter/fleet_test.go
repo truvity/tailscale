@@ -186,7 +186,7 @@ func TestTwoTailnetsFleetsFitInOneStack(t *testing.T) {
 	// after its own tailnet.
 	for _, name := range []string{"tailscale-sg", "tailscale-sg-ingress-wireguard", "tailscale-sg-egress-all",
 		"tailscale-role", "tailscale-instance-profile", "tailscale-lt", "tailscale-asg",
-		"tailscale-lifecycle-hook", "tailscale-cpu-alarm", "tailscale-status-alarm"} {
+		"tailscale-lifecycle-hook"} {
 		found := 0
 
 		for key := range m.res {
@@ -196,6 +196,11 @@ func TestTwoTailnetsFleetsFitInOneStack(t *testing.T) {
 		}
 
 		assert.Equal(t, 2, found, "%s: one per fleet", name)
+	}
+
+	// The fleet's two CloudWatch alarms are gone: monitoring is the estate's own.
+	for key := range m.res {
+		assert.NotContains(t, key, "cloudwatch", "no alarm is created")
 	}
 
 	assert.Equal(t, "example-tailscale-other", m.res["aws:ec2/securityGroup:SecurityGroup/other-tailscale-sg"]["name"].StringValue())
