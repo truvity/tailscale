@@ -498,8 +498,10 @@ func fleetBox(config TailscaleInstanceConfig, awsProvider *aws.Provider, account
 			// The root volume: sized here, not by the image (see
 			// RootVolumeConfig).
 			RootVolume: root,
-			// Source/dest check is disabled by the join after launch
-			// (router-setup.sh).
+			// The source/destination check stays on, EC2's default: the router
+			// masquerades what it forwards into the VPC (firewalld, set up by
+			// router-setup.sh), so the VPC sees the router's own address, and
+			// the role may not change the check.
 			PublicIP: &publicIP,
 		},
 		Group: asg.GroupArgs{
@@ -599,7 +601,7 @@ func (c TailscaleInstanceConfig) sizes() fleetSizes {
 // role has carried it since before the library.
 const assumeRolePolicy = `{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"}}],"Version":"2012-10-17"}`
 
-// rolePolicies are the role's four inline policies, in their order. The
+// rolePolicies are the role's three inline policies, in their order. The
 // first is the library's main policy; the documents are the same bytes the
 // role has always carried.
 func rolePolicies(config TailscaleInstanceConfig, accountID string) ([]asg.InlinePolicy, error) {
@@ -644,22 +646,6 @@ func rolePolicies(config TailscaleInstanceConfig, accountID string) ([]asg.Inlin
 		return nil, fmt.Errorf("marshal KMS policy: %w", err)
 	}
 
-	// EC2 policy — disable source/dest check on self (required for subnet router).
-	// Resource: "*" is intentional: ModifyInstanceAttribute runs in user-data before
-	// ASG tags propagate, so tag-based conditions would cause AccessDenied.
-	// DescribeInstances doesn't support resource-level restrictions.
-	// The permissions boundary (when configured) limits blast radius at account level.
-	ec2Policy, err := doc(map[string]any{
-		iamAction: []string{
-			"ec2:ModifyInstanceAttribute",
-			"ec2:DescribeInstances",
-		},
-		iamResource: "*",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal EC2 policy: %w", err)
-	}
-
 	// ASG lifecycle hook policy — signal readiness after tailscale up
 	asgPolicy, err := doc(map[string]any{
 		iamAction: []string{
@@ -687,7 +673,6 @@ func rolePolicies(config TailscaleInstanceConfig, accountID string) ([]asg.Inlin
 	return []asg.InlinePolicy{
 		fixed("ssm-auth-key", ssmPolicy),
 		fixed("kms-decrypt-ssm", kmsPolicy),
-		fixed("ec2-source-dest-check", ec2Policy),
 		fixed("asg-lifecycle-hook", asgPolicy),
 	}, nil
 }

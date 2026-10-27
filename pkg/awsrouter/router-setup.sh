@@ -339,9 +339,6 @@ sign_host_cert() {
 complete_hook() {
   TOKEN=\$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
   INSTANCE_ID=\$(curl -s -H "X-aws-ec2-metadata-token: \$TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-  if [ "\$1" = CONTINUE ]; then
-    aws ec2 modify-instance-attribute --instance-id "\$INSTANCE_ID" --no-source-dest-check --region $REGION || true
-  fi
   aws autoscaling complete-lifecycle-action \\
     --lifecycle-hook-name $LIFECYCLE_HOOK_NAME \\
     --auto-scaling-group-name $ASG_NAME \\
