@@ -757,6 +757,12 @@ type joinRun struct {
 	aws string
 	// systemctl is the stub `systemctl`; empty exits 0 for everything.
 	systemctl string
+	// state is what `systemctl is-system-running` prints (and exits 1 for
+	// anything but running); empty prints nothing, as the plain stub does.
+	state string
+	// skips: the pass is expected to leave without joining, so it writes
+	// no marker.
+	skips bool
 }
 
 // joinAuthKey is the fake auth key the aws stub returns. It must never reach
@@ -798,7 +804,13 @@ func runJoin(t *testing.T, r joinRun) (output, calls string, ok bool) {
 			[]byte("#!/bin/bash\necho \""+name+" $*\" >> "+shellQuote(log)+"\n"+body+"\n"), 0o755))
 	}
 	stub("tailscale", cmp.Or(r.tailscale, joinTailscaleStub))
-	stub("systemctl", cmp.Or(r.systemctl, "exit 0"))
+	systemctl := cmp.Or(r.systemctl, "exit 0")
+	if r.state != "" {
+		systemctl = `if [ "$1" = is-system-running ]; then echo ` + r.state + `; [ ` + r.state + ` = running ]; exit; fi
+` + systemctl
+	}
+
+	stub("systemctl", systemctl)
 	stub("curl", "echo stub")
 	stub("aws", cmp.Or(r.aws, joinAWSStub))
 	stub("sleep", "exit 0")
@@ -837,7 +849,7 @@ func runJoin(t *testing.T, r joinRun) (output, calls string, ok bool) {
 	out, err := cmd.CombinedOutput()
 
 	// The marker is written once a pass has succeeded.
-	if err == nil {
+	if err == nil && !r.skips {
 		require.FileExists(t, markerPath)
 	}
 
@@ -996,6 +1008,57 @@ func TestJoinScriptAbandonsWhenTheNodeNeverComesUp(t *testing.T) {
 			assert.NotContains(t, calls, "sign", "no host certificate for a router that is not on the tailnet")
 		})
 	}
+}
+
+// The cloud-final drop-in runs the join as ExecStopPost, so a stop into the
+// warm pool or a scale-in terminate runs a pass during shutdown, where
+// systemd refuses every start job and the pass would retry for its whole
+// budget. At shutdown it leaves at once: no tailscaled start, no join, no
+// lifecycle call, no ABANDON.
+func TestJoinScriptSkipsTheShutdownPass(t *testing.T) {
+	for _, marker := range []bool{true, false} {
+		// The budget and the retry sleep are stubbed small, so a pass that
+		// did try to join would end in an ABANDON call, not hang; the
+		// assertions below catch that.
+		began := time.Now()
+		out, calls, ok := runJoin(t, joinRun{
+			marker: marker,
+			state:  "stopping",
+			// A start that fails the way systemd does during shutdown.
+			systemctl: `[ "$1" = enable ] && { echo "Transaction for tailscaled.service/start is destructive" >&2; exit 1; }; exit 0`,
+			skips:     true,
+		})
+		require.True(t, ok, out)
+		assert.Less(t, time.Since(began), 5*time.Second)
+		assert.Contains(t, out, "system is shutting down; no join pass")
+		assert.NotContains(t, out, "boot pass")
+		assert.NotContains(t, out, "attempt")
+		assert.Equal(t, "systemctl is-system-running\n", calls, "nothing but the shutdown check runs")
+	}
+}
+
+// Any other state joins as before, including a system that is still
+// starting or degraded: that is where a failed cloud-final's ExecStopPost
+// pass has to work.
+func TestJoinScriptJoinsWhenTheSystemIsNotShuttingDown(t *testing.T) {
+	for _, state := range []string{"running", "degraded", "starting", "initializing", "maintenance", "offline", "unknown"} {
+		t.Run(state, func(t *testing.T) {
+			out, calls, ok := runJoin(t, joinRun{state: state})
+			require.True(t, ok, out)
+			assert.Contains(t, out, "joined + hook completed")
+			assert.NotContains(t, out, "shutting down")
+			assertOrder(t, calls, "systemctl is-system-running", joinUp, joinContinue)
+		})
+	}
+}
+
+// The drop-in keeps ExecStopPost: it is what joins when cloud-final fails,
+// and the script, not the unit, decides to skip a pass at shutdown.
+func TestRouterSetupCloudFinalDropInKeepsStopPost(t *testing.T) {
+	root, _ := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs)
+	dropIn := mustRead(t, filepath.Join(root, "etc/systemd/system/cloud-final.service.d/99-tailscale-join.conf"))
+	assert.Contains(t, dropIn, "ExecStartPost=-/usr/local/sbin/tailscale-join.sh\n")
+	assert.Contains(t, dropIn, "ExecStopPost=-/usr/local/sbin/tailscale-join.sh\n")
 }
 
 // With no auth key there is nothing to call `tailscale up` with.

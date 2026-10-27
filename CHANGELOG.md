@@ -7,6 +7,8 @@ together at every version.
 
 ## Unreleased
 
+- **Fixed: a router that is stopped or terminated no longer spends ten minutes in its shutdown join pass.** The `cloud-final` drop-in runs `tailscale-join.sh` as `ExecStopPost` as well, which is how a failed `cloud-final` still joins. That stop also fires when Auto Scaling stops the instance into the warm pool or terminates it on scale-in. There the pass found `tailscaled` not running, tried to start it, and systemd refused ("Transaction for tailscaled.service/start is destructive"); it retried every 15 seconds until its 600-second budget ran out. Entering the warm pool took five to six minutes instead of seconds, and a scale-in sat in Terminating for about four and a half. The lifecycle action was already completed, so the late ABANDON changed nothing else. The script now exits 0 at once when `systemctl is-system-running` reports `stopping`, which is true exactly while the shutdown target is active or queued; a failed `cloud-final` on a running system still joins. The `ExecStopPost` line stays, and the resume path is untouched: a warm-pool instance that starts joins through `ExecStartPost` and the `tailscale-join` unit. Consumers set `RouterSetupVersion` to this release (or later) to use it; the user data, and so the launch template, changes with the script.
+
 ## v1.28.0
 
 What the router fleet does when it restarts, and what it no longer creates. Rolling it replaces every router once: the join script is part of the user data, so the launch template gets a new version.
