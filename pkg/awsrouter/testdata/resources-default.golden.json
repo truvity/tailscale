@@ -2,6 +2,8 @@
   {
     "inputs": {
       "desiredCapacity": 1,
+      "healthCheckGracePeriod": 300,
+      "healthCheckType": "EC2",
       "instanceRefresh": {
         "preferences": {
           "instanceWarmup": "300",
@@ -39,7 +41,8 @@
       "vpcZoneIdentifiers": [
         "subnet-0123456789abcdef0",
         "subnet-0123456789abcdef1"
-      ]
+      ],
+      "waitForCapacityTimeout": "0"
     },
     "name": "tailscale-asg",
     "parent": "pulumi:pulumi:Stack::p-s",

@@ -26,7 +26,6 @@ package awsrouter
 import (
 	"bytes"
 	_ "embed"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,8 +38,10 @@ import (
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/autoscaling"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/cloudwatch"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/ec2"
-	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/iam"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+
+	"github.com/truvity/asg"
+	"github.com/truvity/asg/bootstrap"
 )
 
 // Standard AWS tag keys stamped on every resource the fleet owns.
@@ -255,16 +256,6 @@ type (
 	}
 )
 
-// boundaryPtr renders the optional permissions boundary: nil when the
-// estate configures none.
-func boundaryPtr(arn string) pulumi.StringPtrInput {
-	if arn == "" {
-		return nil
-	}
-
-	return pulumi.StringPtr(arn)
-}
-
 // sizeGiB is SizeGiB with its default applied.
 func (v RootVolumeConfig) sizeGiB() int {
 	if v.SizeGiB == 0 {
@@ -297,26 +288,17 @@ func (v RootVolumeConfig) validate() error {
 	return nil
 }
 
-// rootBlockDevice is the launch template's one block device mapping:
-// the image's own root device, resized, encrypted and deleted with the
-// instance. EC2 names the root device per image (/dev/xvda on AL2023),
-// so the name comes from the image lookup, never a constant.
-func rootBlockDevice(deviceName string, v RootVolumeConfig) (ec2.LaunchTemplateBlockDeviceMappingArray, error) {
+// rootVolume is the launch template's one block device mapping: the
+// image's own root device, resized, encrypted and deleted with the
+// instance (the library encrypts and deletes every volume). EC2 names the
+// root device per image (/dev/xvda on AL2023), so the name comes from the
+// image lookup, never a constant.
+func rootVolume(deviceName string, v RootVolumeConfig) (*asg.RootVolumeArgs, error) {
 	if deviceName == "" {
 		return nil, errors.New("awsrouter: the AL2023 image lookup returned no root device name")
 	}
 
-	return ec2.LaunchTemplateBlockDeviceMappingArray{
-		ec2.LaunchTemplateBlockDeviceMappingArgs{
-			DeviceName: pulumi.String(deviceName),
-			Ebs: ec2.LaunchTemplateBlockDeviceMappingEbsArgs{
-				VolumeSize:          pulumi.Int(v.sizeGiB()),
-				VolumeType:          pulumi.String(v.volumeType()),
-				Encrypted:           pulumi.String("true"),
-				DeleteOnTermination: pulumi.String("true"),
-			},
-		},
-	}, nil
+	return &asg.RootVolumeArgs{DeviceName: deviceName, SizeGiB: v.sizeGiB(), Type: v.volumeType()}, nil
 }
 
 // kernel is Kernel with its default applied.
@@ -363,6 +345,12 @@ func (c TailscaleInstanceConfig) baseName() string {
 
 // CreateTailscaleInstance creates all resources for the Tailscale subnet router:
 // security group, IAM role + instance profile, launch template, and ASG.
+//
+// The security group, the role and its profile, the launch template, the
+// group and its launch hook are one github.com/truvity/asg box (fleetBox);
+// the two CloudWatch alarms are this package's own. Every resource keeps
+// the logical name, the physical name and the inputs it had before the
+// library, so moving a stack onto this version replaces nothing.
 func CreateTailscaleInstance(
 	c *pulumi.Context,
 	logger *slog.Logger,
@@ -401,274 +389,10 @@ func CreateTailscaleInstance(
 		slog.Int("vpc_cidrs", len(config.VPCCIDRs)),
 	)
 
-	// ── Security Group ──────────────────────────────────────────────────
-	sg, err := createTailscaleSG(c, awsProvider, config)
-	if err != nil {
-		return nil, err
-	}
-
-	// ── IAM Role + Instance Profile ─────────────────────────────────────
-	instanceProfile, err := createTailscaleInstanceProfile(c, awsProvider, config)
-	if err != nil {
-		return nil, err
-	}
-
-	// ── Launch Template ─────────────────────────────────────────────────
-	lt, err := createTailscaleLaunchTemplate(c, awsProvider, config, sg, instanceProfile)
-	if err != nil {
-		return nil, err
-	}
-
-	// ── Auto Scaling Group ──────────────────────────────────────────────
-	asg, err := createTailscaleASG(c, awsProvider, config, lt)
-	if err != nil {
-		return nil, err
-	}
-
-	logger.InfoContext(ctx, "Tailscale subnet router instance created successfully",
-		slog.String("environment", config.Environment),
-	)
-
-	return &TailscaleInstanceResult{
-		SecurityGroupID:   sg.ID(),
-		InstanceProfileID: instanceProfile.ID(),
-		LaunchTemplateID:  lt.ID(),
-		ASGID:             asg.ID(),
-	}, nil
-}
-
-// ── Security Group ──────────────────────────────────────────────────────────
-
-func createTailscaleSG(
-	c *pulumi.Context,
-	awsProvider *aws.Provider,
-	config TailscaleInstanceConfig,
-) (*ec2.SecurityGroup, error) {
-	env := config.Environment
-
-	sg, err := ec2.NewSecurityGroup(c, config.resourceName("tailscale-sg"), &ec2.SecurityGroupArgs{
-		Name: pulumi.String(config.baseName()),
-		// Historical wording ("SSM access"): a description change forces
-		// AWS to replace the security group, so it stays as is.
-		Description: pulumi.String("Tailscale subnet router - WireGuard UDP ingress, SSM access"),
-		VpcId:       config.VPCID.ToStringOutput(),
-		Tags: pulumi.StringMap{
-			TagName:        pulumi.String(config.baseName()),
-			TagEnvironment: pulumi.String(env),
-			TagManagedBy:   pulumi.String(TagValuePulumi),
-		},
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return nil, fmt.Errorf("create Tailscale security group: %w", err)
-	}
-
-	// UDP 41641 from 0.0.0.0/0 — Tailscale WireGuard
-	// TODO: Add IPv6 ingress rule (::/0 UDP 41641) when IPv6 transport is needed.
-	_, err = ec2.NewSecurityGroupRule(c, config.resourceName("tailscale-sg-ingress-wireguard"), &ec2.SecurityGroupRuleArgs{
-		Type:            pulumi.String("ingress"),
-		FromPort:        pulumi.Int(wireGuardPort),
-		ToPort:          pulumi.Int(wireGuardPort),
-		Protocol:        pulumi.String("udp"),
-		CidrBlocks:      pulumi.StringArray{pulumi.String("0.0.0.0/0")},
-		SecurityGroupId: sg.ID(),
-		Description:     pulumi.String("Tailscale WireGuard"),
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return nil, fmt.Errorf("create Tailscale WireGuard ingress rule: %w", err)
-	}
-
-	// All outbound
-	_, err = ec2.NewSecurityGroupRule(c, config.resourceName("tailscale-sg-egress-all"), &ec2.SecurityGroupRuleArgs{
-		Type:            pulumi.String("egress"),
-		FromPort:        pulumi.Int(0),
-		ToPort:          pulumi.Int(0),
-		Protocol:        pulumi.String("-1"),
-		CidrBlocks:      pulumi.StringArray{pulumi.String("0.0.0.0/0")},
-		SecurityGroupId: sg.ID(),
-		Description:     pulumi.String("All outbound"),
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return nil, fmt.Errorf("create Tailscale egress rule: %w", err)
-	}
-
-	return sg, nil
-}
-
-// ── IAM Role + Instance Profile ─────────────────────────────────────────────
-
-func createTailscaleInstanceProfile(
-	c *pulumi.Context,
-	awsProvider *aws.Provider,
-	config TailscaleInstanceConfig,
-) (*iam.InstanceProfile, error) {
-	env := config.Environment
-
 	callerIdentity, err := aws.GetCallerIdentity(c, nil, pulumi.Provider(awsProvider))
 	if err != nil {
 		return nil, fmt.Errorf("get caller identity: %w", err)
 	}
-
-	// Permissions boundary: the estate's convention, by NAME — composed
-	// against the fleet's own account.
-	pbARN := ""
-	if config.PermissionsBoundaryName != "" {
-		pbARN = fmt.Sprintf("arn:aws:iam::%s:policy/%s", callerIdentity.AccountId, config.PermissionsBoundaryName)
-	}
-
-	// EC2 assume-role trust policy
-	assumeRolePolicy, err := json.Marshal(map[string]any{
-		iamKeyVersion: iamVersion,
-		iamStatement: []map[string]any{{
-			iamEffect:   iamAllow,
-			"Principal": map[string]any{iamService: "ec2.amazonaws.com"},
-			iamAction:   "sts:AssumeRole",
-		}},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal assume role policy: %w", err)
-	}
-
-	// SSM parameter read policy (for /tailscale/auth-key)
-	ssmPolicy, err := json.Marshal(map[string]any{
-		iamKeyVersion: iamVersion,
-		iamStatement: []map[string]any{{
-			iamEffect: iamAllow,
-			iamAction: []string{
-				"ssm:GetParameter",
-				"ssm:GetParameters",
-			},
-			iamResource: fmt.Sprintf(
-				"arn:aws:ssm:%s:%s:parameter%s",
-				config.Region, callerIdentity.AccountId, config.SSMAuthKeyPath,
-			),
-		}},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal SSM policy: %w", err)
-	}
-
-	// KMS decrypt policy (for aws/ssm key — needed for SecureString)
-	// Use key/* with ResourceAliases condition because IAM kms:Decrypt requires the actual key ARN, not an alias ARN.
-	kmsPolicy, err := json.Marshal(map[string]any{
-		iamKeyVersion: iamVersion,
-		iamStatement: []map[string]any{{
-			iamEffect:   iamAllow,
-			iamAction:   []string{"kms:Decrypt"},
-			iamResource: fmt.Sprintf("arn:aws:kms:%s:%s:key/*", config.Region, callerIdentity.AccountId),
-			"Condition": map[string]any{
-				"ForAnyValue:StringEquals": map[string]any{
-					"kms:ResourceAliases": "alias/aws/ssm",
-				},
-			},
-		}},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal KMS policy: %w", err)
-	}
-
-	// EC2 policy — disable source/dest check on self (required for subnet router).
-	// Resource: "*" is intentional: ModifyInstanceAttribute runs in user-data before
-	// ASG tags propagate, so tag-based conditions would cause AccessDenied.
-	// DescribeInstances doesn't support resource-level restrictions.
-	// The permissions boundary (when configured) limits blast radius at account level.
-	ec2Policy, err := json.Marshal(map[string]any{
-		iamKeyVersion: iamVersion,
-		iamStatement: []map[string]any{{
-			iamEffect: iamAllow,
-			iamAction: []string{
-				"ec2:ModifyInstanceAttribute",
-				"ec2:DescribeInstances",
-			},
-			iamResource: "*",
-		}},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal EC2 policy: %w", err)
-	}
-
-	// ASG lifecycle hook policy — signal readiness after tailscale up
-	asgPolicy, err := json.Marshal(map[string]any{
-		iamKeyVersion: iamVersion,
-		iamStatement: []map[string]any{{
-			iamEffect: iamAllow,
-			iamAction: []string{
-				"autoscaling:CompleteLifecycleAction",
-			},
-			iamResource: fmt.Sprintf(
-				"arn:aws:autoscaling:%s:%s:autoScalingGroup:*:autoScalingGroupName/%s",
-				config.Region, callerIdentity.AccountId, config.baseName(),
-			),
-		}},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal ASG policy: %w", err)
-	}
-
-	role, err := iam.NewRole(c, config.resourceName("tailscale-role"), &iam.RoleArgs{
-		Name:                pulumi.String(config.baseName()),
-		AssumeRolePolicy:    pulumi.String(string(assumeRolePolicy)),
-		PermissionsBoundary: boundaryPtr(pbARN),
-		InlinePolicies: iam.RoleInlinePolicyArray{
-			iam.RoleInlinePolicyArgs{
-				Name:   pulumi.String("ssm-auth-key"),
-				Policy: pulumi.String(string(ssmPolicy)),
-			},
-			iam.RoleInlinePolicyArgs{
-				Name:   pulumi.String("kms-decrypt-ssm"),
-				Policy: pulumi.String(string(kmsPolicy)),
-			},
-			iam.RoleInlinePolicyArgs{
-				Name:   pulumi.String("ec2-source-dest-check"),
-				Policy: pulumi.String(string(ec2Policy)),
-			},
-			iam.RoleInlinePolicyArgs{
-				Name:   pulumi.String("asg-lifecycle-hook"),
-				Policy: pulumi.String(string(asgPolicy)),
-			},
-		},
-		Tags: pulumi.StringMap{
-			TagName:        pulumi.String(config.baseName()),
-			TagEnvironment: pulumi.String(env),
-			TagManagedBy:   pulumi.String(TagValuePulumi),
-		},
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return nil, fmt.Errorf("create Tailscale IAM role: %w", err)
-	}
-
-	// No AmazonSSMManagedInstanceCore: it grants ssm:GetParameter(s) on
-	// every parameter in the account (which, with kms-decrypt-ssm above,
-	// reads every default-key SecureString) and routers run no Session
-	// Manager shell. Break-glass is replacing the instance; diagnosis is
-	// the serial console output (docs/safety.md, "Routers: access,
-	// diagnosis and break-glass").
-
-	instanceProfile, err := iam.NewInstanceProfile(c, config.resourceName("tailscale-instance-profile"), &iam.InstanceProfileArgs{
-		Name: pulumi.String(config.baseName()),
-		Role: role.Name,
-		Tags: pulumi.StringMap{
-			TagName:        pulumi.String(config.baseName()),
-			TagEnvironment: pulumi.String(env),
-			TagManagedBy:   pulumi.String(TagValuePulumi),
-		},
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return nil, fmt.Errorf("create Tailscale instance profile: %w", err)
-	}
-
-	return instanceProfile, nil
-}
-
-// ── Launch Template ─────────────────────────────────────────────────────────
-
-func createTailscaleLaunchTemplate(
-	c *pulumi.Context,
-	awsProvider *aws.Provider,
-	config TailscaleInstanceConfig,
-	sg *ec2.SecurityGroup,
-	instanceProfile *iam.InstanceProfile,
-) (*ec2.LaunchTemplate, error) {
-	env := config.Environment
 
 	// Look up the newest standard Amazon Linux 2023 ARM64 AMI on one
 	// kernel line (see ImageConfig): never a minimal image, which lacks
@@ -686,66 +410,282 @@ func createTailscaleLaunchTemplate(
 		return nil, fmt.Errorf("lookup AL2023 ARM64 AMI: %w", err)
 	}
 
-	// Build user-data script with dynamic VPC CIDRs and region
-	userData := buildTailscaleUserData(config)
-	userDataB64 := base64.StdEncoding.EncodeToString([]byte(userData))
-
-	blockDevices, err := rootBlockDevice(ami.RootDeviceName, config.RootVolume)
+	args, err := fleetBox(config, awsProvider, callerIdentity.AccountId, ami)
 	if err != nil {
 		return nil, err
 	}
 
-	lt, err := ec2.NewLaunchTemplate(c, config.resourceName("tailscale-lt"), &ec2.LaunchTemplateArgs{
-		Name:                 pulumi.String(config.baseName()),
-		UpdateDefaultVersion: pulumi.Bool(true),
-		ImageId:              pulumi.String(ami.Id),
-		// t4g.micro (1GB): t4g.nano's 512MB OOM-killed cloud-init during
-		// first-boot dnf runs on current AL2023 (see tailscale_userdata
-		// swap/no-upgrade notes) — 1GB + swap gives dnf real headroom.
-		InstanceType: pulumi.String("t4g.micro"),
-		UserData:     pulumi.String(userDataB64),
-		// The root volume: sized here, not by the image (see
-		// RootVolumeConfig).
-		BlockDeviceMappings: blockDevices,
-		IamInstanceProfile: ec2.LaunchTemplateIamInstanceProfileArgs{
-			Arn: instanceProfile.Arn,
-		},
-		// Network interface — source/dest check is disabled via user-data after instance launch
-		NetworkInterfaces: ec2.LaunchTemplateNetworkInterfaceArray{
-			ec2.LaunchTemplateNetworkInterfaceArgs{
-				AssociatePublicIpAddress: pulumi.String("true"),
-				DeviceIndex:              pulumi.Int(0),
-				SecurityGroups: pulumi.StringArray{
-					sg.ID().ToStringOutput(),
-				},
-			},
-		},
-		MetadataOptions: ec2.LaunchTemplateMetadataOptionsArgs{
-			HttpTokens:              pulumi.String("required"), // IMDSv2
-			HttpEndpoint:            pulumi.String("enabled"),
-			HttpPutResponseHopLimit: pulumi.Int(2),
-		},
-		TagSpecifications: ec2.LaunchTemplateTagSpecificationArray{
-			ec2.LaunchTemplateTagSpecificationArgs{
-				ResourceType: pulumi.String("instance"),
-				Tags: pulumi.StringMap{
-					TagName:        pulumi.String(config.baseName()),
-					TagEnvironment: pulumi.String(env),
-					TagManagedBy:   pulumi.String(TagValuePulumi),
-				},
-			},
-		},
-		Tags: pulumi.StringMap{
-			TagName:        pulumi.String(config.baseName()),
-			TagEnvironment: pulumi.String(env),
-			TagManagedBy:   pulumi.String(TagValuePulumi),
-		},
-	}, pulumi.Provider(awsProvider))
+	box, err := asg.New(c, config.resourceName("tailscale"), args, pulumi.Provider(awsProvider))
 	if err != nil {
-		return nil, fmt.Errorf("create Tailscale launch template: %w", err)
+		return nil, fmt.Errorf("create Tailscale router box: %w", err)
 	}
 
-	return lt, nil
+	if err := createTailscaleAlarms(c, awsProvider, config, box.Group); err != nil {
+		return nil, err
+	}
+
+	logger.InfoContext(ctx, "Tailscale subnet router instance created successfully",
+		slog.String("environment", config.Environment),
+	)
+
+	return &TailscaleInstanceResult{
+		SecurityGroupID:   box.SecurityGroup.ID(),
+		InstanceProfileID: box.InstanceProfile.ID(),
+		LaunchTemplateID:  box.LaunchTemplate.ID(),
+		ASGID:             box.Group.ID(),
+	}, nil
+}
+
+// fleetBox is the router fleet as a github.com/truvity/asg box. The Compat
+// block keeps every resource where the hand-built fleet put it: no
+// component (Flat), the old logical names, the instance-only launch tags
+// and the compact trust policy. Everything else the library already
+// declares the same way.
+func fleetBox(config TailscaleInstanceConfig, awsProvider *aws.Provider, accountID string, ami *ec2.LookupAmiResult) (*asg.Args, error) {
+	root, err := rootVolume(ami.RootDeviceName, config.RootVolume)
+	if err != nil {
+		return nil, err
+	}
+
+	userData, err := bootstrap.Verbatim(buildTailscaleUserData(config), 0)
+	if err != nil {
+		return nil, fmt.Errorf("tailscale user-data: %w", err)
+	}
+
+	policies, err := rolePolicies(config, accountID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Permissions boundary: the estate's convention, by NAME — composed
+	// against the fleet's own account.
+	pbARN := ""
+	if config.PermissionsBoundaryName != "" {
+		pbARN = fmt.Sprintf("arn:aws:iam::%s:policy/%s", accountID, config.PermissionsBoundaryName)
+	}
+
+	sizes := config.sizes()
+	publicIP := true
+
+	subnetIDs := make([]pulumi.StringInput, len(config.RouterSubnets))
+	for i, id := range config.RouterSubnets {
+		subnetIDs[i] = id.ToStringOutput()
+	}
+
+	var warmPool *asg.WarmPoolArgs
+	if config.WarmPool {
+		// Capped at the group's maximum: no over-provisioning.
+		maxPrepared := sizes.max
+		warmPool = &asg.WarmPoolArgs{State: "Stopped", MinSize: sizes.desired, MaxGroupPreparedCapacity: &maxPrepared}
+	}
+
+	prefixed := config.resourceName
+
+	return &asg.Args{
+		Names: asg.Names{
+			Base: config.baseName(),
+			// The fixed name the security group has always had (the
+			// library's default is a generated one).
+			SecurityGroup: config.baseName(),
+		},
+		Tags:     map[string]string{TagEnvironment: config.Environment},
+		Provider: awsProvider,
+		UserData: userData,
+		Image:    asg.ImageArgs{ID: pulumi.String(ami.Id)},
+		Instance: asg.InstanceArgs{
+			// t4g.micro (1GB): t4g.nano's 512MB OOM-killed cloud-init during
+			// first-boot dnf runs on current AL2023 (see tailscale_userdata
+			// swap/no-upgrade notes) — 1GB + swap gives dnf real headroom.
+			Type: "t4g.micro",
+			// IMDSv2 (the library always requires it) with the hop limit
+			// the launch template has always had.
+			HopLimit: 2,
+			// The root volume: sized here, not by the image (see
+			// RootVolumeConfig).
+			RootVolume: root,
+			// Source/dest check is disabled by the join after launch
+			// (router-setup.sh).
+			PublicIP: &publicIP,
+		},
+		Group: asg.GroupArgs{
+			Min:       sizes.min,
+			Max:       sizes.max,
+			Desired:   sizes.desired,
+			SubnetIDs: subnetIDs,
+		},
+		// The instance must signal readiness after tailscale up or get
+		// terminated. 15 minutes: first boot may reboot mid-cloud-init
+		// (AL2023 SELinux kernel-cmdline apply) before the tailscale-join
+		// unit completes. A separate resource, as it always was.
+		Hook:     &asg.HookArgs{Mode: asg.HookSeparate, HeartbeatTimeoutSeconds: 900, DefaultResult: "ABANDON"},
+		WarmPool: warmPool,
+		Refresh: &asg.RefreshArgs{
+			MinHealthyPercentage: sizes.minHealthy,
+			// 5 min — Tailscale needs time to connect and advertise routes.
+			WarmupSeconds: 300,
+			// Redundant: Auto Scaling refreshes on every launch template
+			// version anyway, and Pulumi warns about it. Kept so this
+			// version changes nothing in a live group.
+			Triggers: []string{"launch_template"},
+		},
+		IAM: asg.IAMArgs{
+			PermissionsBoundary: pbARN,
+			PolicyName:          policies[0].Name,
+			Policy:              policies[0].Policy,
+			ExtraInlinePolicies: policies[1:],
+		},
+		Security: asg.SecurityArgs{
+			VPCID: config.VPCID.ToStringOutput(),
+			// Historical wording ("SSM access"): a description change forces
+			// AWS to replace the security group, so it stays as is.
+			Description: "Tailscale subnet router - WireGuard UDP ingress, SSM access",
+			Style:       asg.RulesLegacy,
+			// UDP 41641 from 0.0.0.0/0 — Tailscale WireGuard.
+			// TODO: Add IPv6 ingress rule (::/0 UDP 41641) when IPv6 transport is needed.
+			Ingress: []asg.Rule{{
+				Description: "Tailscale WireGuard",
+				Protocol:    "udp",
+				FromPort:    wireGuardPort,
+				ToPort:      wireGuardPort,
+				CIDRs:       []string{"0.0.0.0/0"},
+				World:       true,
+			}},
+			Egress: []asg.Rule{{Description: "All outbound", Protocol: "-1", CIDRs: []string{"0.0.0.0/0"}}},
+		},
+		Compat: asg.Compat{
+			Flat: true,
+			Names: asg.Logical{
+				Role:            prefixed("tailscale-role"),
+				InstanceProfile: prefixed("tailscale-instance-profile"),
+				SecurityGroup:   prefixed("tailscale-sg"),
+				LaunchTemplate:  prefixed("tailscale-lt"),
+				Group:           prefixed("tailscale-asg"),
+				Hook:            prefixed("tailscale-lifecycle-hook"),
+				Ingress:         func(int, int) string { return prefixed("tailscale-sg-ingress-wireguard") },
+				Egress:          func(int, int) string { return prefixed("tailscale-sg-egress-all") },
+			},
+			LaunchTemplateTagTypes: []string{"instance"},
+			AssumeRolePolicy:       assumeRolePolicy,
+		},
+	}, nil
+}
+
+// fleetSizes is the group's sizing after this package's defaults.
+type fleetSizes struct {
+	min, desired, max int
+	// minHealthy is the refresh's MinHealthyPercentage: 0 for one
+	// router, 50 for two or more.
+	minHealthy int
+}
+
+func (c TailscaleInstanceConfig) sizes() fleetSizes {
+	s := fleetSizes{min: max(c.Min, 1), desired: max(c.Desired, 1), max: c.Max}
+	if s.max < s.desired {
+		s.max = s.desired + 1
+	}
+
+	if s.desired > 1 {
+		s.minHealthy = 50
+	}
+
+	return s
+}
+
+// assumeRolePolicy is the role's trust policy, compact, exactly as the
+// role has carried it since before the library.
+const assumeRolePolicy = `{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"}}],"Version":"2012-10-17"}`
+
+// rolePolicies are the role's four inline policies, in their order. The
+// first is the library's main policy; the documents are the same bytes the
+// role has always carried.
+func rolePolicies(config TailscaleInstanceConfig, accountID string) ([]asg.InlinePolicy, error) {
+	doc := func(statement map[string]any) (string, error) {
+		statement[iamEffect] = iamAllow
+
+		b, err := json.Marshal(map[string]any{
+			iamKeyVersion: iamVersion,
+			iamStatement:  []map[string]any{statement},
+		})
+
+		return string(b), err
+	}
+
+	// SSM parameter read policy (for the auth key).
+	ssmPolicy, err := doc(map[string]any{
+		iamAction: []string{
+			"ssm:GetParameter",
+			"ssm:GetParameters",
+		},
+		iamResource: fmt.Sprintf(
+			"arn:aws:ssm:%s:%s:parameter%s",
+			config.Region, accountID, config.SSMAuthKeyPath,
+		),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal SSM policy: %w", err)
+	}
+
+	// KMS decrypt policy (for aws/ssm key — needed for SecureString)
+	// Use key/* with ResourceAliases condition because IAM kms:Decrypt requires the actual key ARN, not an alias ARN.
+	kmsPolicy, err := doc(map[string]any{
+		iamAction:   []string{"kms:Decrypt"},
+		iamResource: fmt.Sprintf("arn:aws:kms:%s:%s:key/*", config.Region, accountID),
+		"Condition": map[string]any{
+			"ForAnyValue:StringEquals": map[string]any{
+				"kms:ResourceAliases": "alias/aws/ssm",
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal KMS policy: %w", err)
+	}
+
+	// EC2 policy — disable source/dest check on self (required for subnet router).
+	// Resource: "*" is intentional: ModifyInstanceAttribute runs in user-data before
+	// ASG tags propagate, so tag-based conditions would cause AccessDenied.
+	// DescribeInstances doesn't support resource-level restrictions.
+	// The permissions boundary (when configured) limits blast radius at account level.
+	ec2Policy, err := doc(map[string]any{
+		iamAction: []string{
+			"ec2:ModifyInstanceAttribute",
+			"ec2:DescribeInstances",
+		},
+		iamResource: "*",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal EC2 policy: %w", err)
+	}
+
+	// ASG lifecycle hook policy — signal readiness after tailscale up
+	asgPolicy, err := doc(map[string]any{
+		iamAction: []string{
+			"autoscaling:CompleteLifecycleAction",
+		},
+		iamResource: fmt.Sprintf(
+			"arn:aws:autoscaling:%s:%s:autoScalingGroup:*:autoScalingGroupName/%s",
+			config.Region, accountID, config.baseName(),
+		),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal ASG policy: %w", err)
+	}
+
+	fixed := func(name, policy string) asg.InlinePolicy {
+		return asg.InlinePolicy{Name: name, Policy: func(asg.PolicyContext) (string, error) { return policy, nil }}
+	}
+
+	// No AmazonSSMManagedInstanceCore: it grants ssm:GetParameter(s) on
+	// every parameter in the account (which, with kms-decrypt-ssm above,
+	// reads every default-key SecureString) and routers run no Session
+	// Manager shell. Break-glass is replacing the instance; diagnosis is
+	// the serial console output (docs/safety.md, "Routers: access,
+	// diagnosis and break-glass").
+	return []asg.InlinePolicy{
+		fixed("ssm-auth-key", ssmPolicy),
+		fixed("kms-decrypt-ssm", kmsPolicy),
+		fixed("ec2-source-dest-check", ec2Policy),
+		fixed("asg-lifecycle-hook", asgPolicy),
+	}, nil
 }
 
 func buildTailscaleUserData(config TailscaleInstanceConfig) string {
@@ -778,111 +718,18 @@ func buildTailscaleUserData(config TailscaleInstanceConfig) string {
 	return buf.String()
 }
 
-// ── Auto Scaling Group ──────────────────────────────────────────────────────
+// ── CloudWatch alarms ───────────────────────────────────────────────────────
 
-func createTailscaleASG(
+// createTailscaleAlarms are the two CloudWatch alarms on the group, this
+// package's own rather than the library's (whose alarms are deprecated),
+// with the inputs they always had.
+func createTailscaleAlarms(
 	c *pulumi.Context,
 	awsProvider *aws.Provider,
 	config TailscaleInstanceConfig,
-	lt *ec2.LaunchTemplate,
-) (*autoscaling.Group, error) {
+	group *autoscaling.Group,
+) error {
 	env := config.Environment
-
-	// Apply defaults for ASG sizing
-	minSize := config.Min
-	if minSize < 1 {
-		minSize = 1
-	}
-
-	desired := config.Desired
-	if desired < 1 {
-		desired = 1
-	}
-
-	maxSize := config.Max
-	if maxSize < desired {
-		maxSize = desired + 1
-	}
-
-	// MinHealthyPercentage: 0 for single instance, 50 for 2+
-	minHealthy := 0
-	if desired > 1 {
-		minHealthy = 50
-	}
-
-	// Convert subnet IDs to StringArray for VpcZoneIdentifiers
-	subnetIDs := make(pulumi.StringArray, len(config.RouterSubnets))
-	for i, id := range config.RouterSubnets {
-		subnetIDs[i] = id.ToStringOutput()
-	}
-
-	asgArgs := &autoscaling.GroupArgs{
-		Name:               pulumi.String(config.baseName()),
-		MinSize:            pulumi.Int(minSize),
-		MaxSize:            pulumi.Int(maxSize),
-		DesiredCapacity:    pulumi.Int(desired),
-		VpcZoneIdentifiers: subnetIDs,
-		LaunchTemplate: autoscaling.GroupLaunchTemplateArgs{
-			Id:      lt.ID(),
-			Version: lt.LatestVersion.ApplyT(func(v int) string { return fmt.Sprintf("%d", v) }).(pulumi.StringOutput),
-		},
-		InstanceRefresh: autoscaling.GroupInstanceRefreshArgs{
-			Strategy: pulumi.String("Rolling"),
-			Preferences: autoscaling.GroupInstanceRefreshPreferencesArgs{
-				MinHealthyPercentage: pulumi.Int(minHealthy),
-				InstanceWarmup:       pulumi.String("300"), // 5 min — Tailscale needs time to connect and advertise routes
-			},
-			Triggers: pulumi.StringArray{
-				pulumi.String("launch_template"),
-			},
-		},
-		Tags: autoscaling.GroupTagArray{
-			autoscaling.GroupTagArgs{
-				Key:               pulumi.String(TagName),
-				Value:             pulumi.String(config.baseName()),
-				PropagateAtLaunch: pulumi.Bool(true),
-			},
-			autoscaling.GroupTagArgs{
-				Key:               pulumi.String(TagEnvironment),
-				Value:             pulumi.String(env),
-				PropagateAtLaunch: pulumi.Bool(true),
-			},
-			autoscaling.GroupTagArgs{
-				Key:               pulumi.String(TagManagedBy),
-				Value:             pulumi.String(TagValuePulumi),
-				PropagateAtLaunch: pulumi.Bool(true),
-			},
-		},
-	}
-
-	if config.WarmPool {
-		asgArgs.WarmPool = autoscaling.GroupWarmPoolArgs{
-			PoolState:                pulumi.String("Stopped"),
-			MinSize:                  pulumi.Int(desired),
-			MaxGroupPreparedCapacity: pulumi.Int(maxSize), // Cap at ASG max — no over-provisioning
-		}
-	}
-
-	asg, err := autoscaling.NewGroup(c, config.resourceName("tailscale-asg"), asgArgs, pulumi.Provider(awsProvider))
-	if err != nil {
-		return nil, fmt.Errorf("create Tailscale ASG: %w", err)
-	}
-
-	// Lifecycle hook — instance must signal readiness after tailscale up or get terminated.
-	hookName := config.baseName() + "-launch"
-
-	_, err = autoscaling.NewLifecycleHook(c, config.resourceName("tailscale-lifecycle-hook"), &autoscaling.LifecycleHookArgs{
-		Name:                 pulumi.String(hookName),
-		AutoscalingGroupName: asg.Name,
-		LifecycleTransition:  pulumi.String("autoscaling:EC2_INSTANCE_LAUNCHING"),
-		// 15 minutes: first boot may reboot mid-cloud-init (AL2023 SELinux
-		// kernel-cmdline apply) before the tailscale-join unit completes.
-		HeartbeatTimeout: pulumi.Int(900),
-		DefaultResult:    pulumi.String("ABANDON"),
-	}, pulumi.Provider(awsProvider))
-	if err != nil {
-		return nil, fmt.Errorf("create Tailscale ASG lifecycle hook: %w", err)
-	}
 
 	// CloudWatch alarms: sustained high CPU and a failed instance status
 	// check, so the router's CPU and health are monitored where AWS
@@ -890,7 +737,7 @@ func createTailscaleASG(
 	// is the caller's decision, and an SNS topic in another account needs
 	// cross-account IAM this module does not own. A caller routes them
 	// from CloudWatch (or replaces them with its own alerting).
-	_, err = cloudwatch.NewMetricAlarm(c, config.resourceName("tailscale-cpu-alarm"), &cloudwatch.MetricAlarmArgs{
+	_, err := cloudwatch.NewMetricAlarm(c, config.resourceName("tailscale-cpu-alarm"), &cloudwatch.MetricAlarmArgs{
 		Name:               pulumi.String(config.baseName() + "-cpu-high"),
 		ComparisonOperator: pulumi.String("GreaterThanThreshold"),
 		EvaluationPeriods:  pulumi.Int(3),
@@ -901,7 +748,7 @@ func createTailscaleASG(
 		Threshold:          pulumi.Float64(90),
 		AlarmDescription:   pulumi.String("Tailscale router CPU > 90% for 15 minutes"),
 		Dimensions: pulumi.StringMap{
-			"AutoScalingGroupName": asg.Name,
+			"AutoScalingGroupName": group.Name,
 		},
 		Tags: pulumi.StringMap{
 			TagName:        pulumi.String(config.baseName() + "-cpu-high"),
@@ -910,7 +757,7 @@ func createTailscaleASG(
 		},
 	}, pulumi.Provider(awsProvider))
 	if err != nil {
-		return nil, fmt.Errorf("create Tailscale CPU alarm: %w", err)
+		return fmt.Errorf("create Tailscale CPU alarm: %w", err)
 	}
 
 	_, err = cloudwatch.NewMetricAlarm(c, config.resourceName("tailscale-status-alarm"), &cloudwatch.MetricAlarmArgs{
@@ -924,7 +771,7 @@ func createTailscaleASG(
 		Threshold:          pulumi.Float64(0),
 		AlarmDescription:   pulumi.String("Tailscale router instance status check failed"),
 		Dimensions: pulumi.StringMap{
-			"AutoScalingGroupName": asg.Name,
+			"AutoScalingGroupName": group.Name,
 		},
 		Tags: pulumi.StringMap{
 			TagName:        pulumi.String(config.baseName() + "-status-check"),
@@ -933,8 +780,8 @@ func createTailscaleASG(
 		},
 	}, pulumi.Provider(awsProvider))
 	if err != nil {
-		return nil, fmt.Errorf("create Tailscale status check alarm: %w", err)
+		return fmt.Errorf("create Tailscale status check alarm: %w", err)
 	}
 
-	return asg, nil
+	return nil
 }

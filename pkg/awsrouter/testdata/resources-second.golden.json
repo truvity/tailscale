@@ -2,6 +2,8 @@
   {
     "inputs": {
       "desiredCapacity": 2,
+      "healthCheckGracePeriod": 300,
+      "healthCheckType": "EC2",
       "instanceRefresh": {
         "preferences": {
           "instanceWarmup": "300",
@@ -40,6 +42,7 @@
         "subnet-0123456789abcdef0",
         "subnet-0123456789abcdef1"
       ],
+      "waitForCapacityTimeout": "0",
       "warmPool": {
         "maxGroupPreparedCapacity": 3,
         "minSize": 2,

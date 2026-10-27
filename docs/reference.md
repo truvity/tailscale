@@ -362,6 +362,10 @@ The result, `*TailscaleInstanceResult`, carries `SecurityGroupID`,
 
 ### What it creates
 
+All but the alarms are one [`github.com/truvity/asg`](https://github.com/truvity/asg)
+box (`asg.New`), declared with the logical and physical names the fleet had
+before it used the library, so a stack that moves to it replaces nothing.
+
 | Resource | Shape |
 |---|---|
 | security group | ingress UDP 41641 (WireGuard) from anywhere, egress everything; **no TCP port** |
