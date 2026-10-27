@@ -249,6 +249,9 @@ EOF
   mkdir -p "$ROOT/etc/systemd/system/cloud-final.service.d"
   cat >"$ROOT/etc/systemd/system/cloud-final.service.d/99-tailscale-join.conf" <<'EOF'
 [Service]
+# StopPost also fires when cloud-final FAILS (e.g. killed mid-modules): the
+# join must not depend on cloud-init finishing cleanly. It fires at
+# shutdown too; the script skips that pass.
 ExecStartPost=-/usr/local/sbin/tailscale-join.sh
 ExecStopPost=-/usr/local/sbin/tailscale-join.sh
 EOF
@@ -293,6 +296,20 @@ write_join_script() {
 set -uo pipefail
 MARKER=/var/lib/tailscale-join.done
 LOCK=/run/tailscale-join.lock
+# Nothing to join at shutdown. The cloud-final drop-in runs this script
+# again as ExecStopPost, which also fires when the instance is stopped
+# into the warm pool or terminated; systemd then refuses every start job
+# ("Transaction ... is destructive"), so the pass would retry for its whole
+# budget (ten minutes) and hold the shutdown up. \`is-system-running\` is
+# "stopping" exactly while shutdown.target is active or queued, whatever
+# the cause (poweroff, reboot, halt, a stop from the API). A failed
+# cloud-final on a running system, the case ExecStopPost is for, reports
+# running, degraded or starting, and joins as before. Checked before the
+# log redirect and the lock: it needs neither.
+if [ "\$(systemctl is-system-running 2>/dev/null)" = stopping ]; then
+  echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') tailscale-join: system is shutting down; no join pass"
+  exit 0
+fi
 # Log file AND stdout: both callers send stdout to the serial console,
 # so \`aws ec2 get-console-output\` shows a join failing without a shell.
 exec > >(tee -a /var/log/tailscale-join.log) 2>&1

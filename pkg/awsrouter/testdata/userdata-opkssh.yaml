@@ -114,7 +114,7 @@ runcmd:
   # applied (timezone, packages) — never a half-verified script.
   - curl -fsSL -o /usr/local/sbin/router-setup.sh "https://github.com/truvity/tailscale/releases/download/v1.11.0/router-setup-v1.11.0.sh"
   - |
-    echo "79796e47578cf54f60bf5693be6e1f66c8dc3da26ce78fa20553c8035daa8bd0  /usr/local/sbin/router-setup.sh" | sha256sum -c - || { echo "router-setup checksum fail"; exit 0; }
+    echo "8f610903048dfacda708d3a977fd85667bb7e8054654c133c80f71c1334d79c2  /usr/local/sbin/router-setup.sh" | sha256sum -c - || { echo "router-setup checksum fail"; exit 0; }
   - chmod 0755 /usr/local/sbin/router-setup.sh
   - /usr/local/sbin/router-setup.sh || echo "router-setup fail"
 

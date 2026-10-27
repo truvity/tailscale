@@ -114,7 +114,7 @@
         "Name": "example-tailscale-acme"
       },
       "updateDefaultVersion": true,
-      "userData": "sha256:5b2ecc3f2f16f1b066026e7a2c27b231bd6001cf74c72300eb4ed09da26f445e"
+      "userData": "sha256:083570d8d0cb07dc777e4bede72b494dff08ad32560fd2bbd5a536800d44c620"
     },
     "name": "tailscale-lt",
     "parent": "pulumi:pulumi:Stack::p-s",
