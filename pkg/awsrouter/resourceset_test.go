@@ -258,10 +258,11 @@ var stepBDeleted = map[string]bool{
 //     in place of the old refresh, and nothing else;
 //   - a launch template whose user data differs (the join script is new)
 //     and nothing else;
+//   - a role without the inline policy that let it change its own
+//     source/destination check (ec2:ModifyInstanceAttribute, and
+//     ec2:DescribeInstances, which nothing used);
 //   - every other resource unchanged: same type, logical name, parent,
 //     provider and inputs.
-//
-// The IAM policies are unchanged here; narrowing them is a separate step.
 func TestStepBChangesTheHandBuiltResourceSetAsDocumented(t *testing.T) {
 	for name, c := range resourceSetCases(t) {
 		t.Run(name, func(t *testing.T) {
@@ -308,6 +309,20 @@ func TestStepBChangesTheHandBuiltResourceSetAsDocumented(t *testing.T) {
 					require.NotEqual(t, oldIn["instanceRefresh"], nowIn["instanceRefresh"])
 					delete(oldIn, "instanceRefresh")
 					delete(nowIn, "instanceRefresh")
+				case "aws:iam/role:Role":
+					// The role may no longer change its own source/destination
+					// check: the inline policy that allowed it is gone, and
+					// the other three are as they were.
+					var kept []any
+
+					for _, p := range oldIn["inlinePolicies"].([]any) {
+						if p.(map[string]any)["name"] != "ec2-source-dest-check" {
+							kept = append(kept, p)
+						}
+					}
+
+					require.Len(t, kept, 3, "the hand-built role had four inline policies")
+					oldIn["inlinePolicies"] = kept
 				case "aws:ec2/launchTemplate:LaunchTemplate":
 					require.NotEqual(t, oldIn["userData"], nowIn["userData"], "the join script changed the user data")
 					delete(oldIn, "userData")
@@ -334,4 +349,19 @@ func TestMaxLeavesRoomForARefresh(t *testing.T) {
 		got := TailscaleInstanceConfig{Min: tc.min, Desired: tc.desired, Max: tc.max}.sizes()
 		assert.Equal(t, tc.want, got.max, "min %d desired %d max %d", tc.min, tc.desired, tc.max)
 	}
+}
+
+// No fleet's role may allow an EC2 action: the source/destination check
+// stays at EC2's default, and the join does not touch it.
+func TestRoleAllowsNoEC2Action(t *testing.T) {
+	for name, c := range resourceSetCases(t) {
+		t.Run(name, func(t *testing.T) {
+			got := recordResourceSet(t, c).dump(t)
+			assert.NotContains(t, got, "ec2:")
+			assert.NotContains(t, got, "ModifyInstanceAttribute")
+		})
+	}
+
+	assert.NotContains(t, routerSetupScript, "modify-instance-attribute")
+	assert.NotContains(t, routerSetupScript, "source-dest")
 }
