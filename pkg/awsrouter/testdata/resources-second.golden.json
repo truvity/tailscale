@@ -114,7 +114,7 @@
         "Name": "example-tailscale-other"
       },
       "updateDefaultVersion": true,
-      "userData": "sha256:4ab012432ff52879dcf95c7419fa545e9006df17b4bbcc4c89cf45c30e2e1c0c"
+      "userData": "sha256:a50a9501af81bd22497e607be5c96184d21f1fae1b89612e97aab0ebe717369e"
     },
     "name": "other-tailscale-lt",
     "parent": "pulumi:pulumi:Stack::p-s",
@@ -197,10 +197,6 @@
         {
           "name": "kms-decrypt-ssm",
           "policy": "{\"Statement\":[{\"Action\":[\"kms:Decrypt\"],\"Condition\":{\"ForAnyValue:StringEquals\":{\"kms:ResourceAliases\":\"alias/aws/ssm\"}},\"Effect\":\"Allow\",\"Resource\":\"arn:aws:kms:eu-west-1:@ACCOUNT@:key/*\"}],\"Version\":\"2012-10-17\"}"
-        },
-        {
-          "name": "ec2-source-dest-check",
-          "policy": "{\"Statement\":[{\"Action\":[\"ec2:ModifyInstanceAttribute\",\"ec2:DescribeInstances\"],\"Effect\":\"Allow\",\"Resource\":\"*\"}],\"Version\":\"2012-10-17\"}"
         },
         {
           "name": "asg-lifecycle-hook",

@@ -369,7 +369,7 @@ before it used the library, so a stack that moves to it replaces nothing.
 | Resource | Shape |
 |---|---|
 | security group | ingress UDP 41641 (WireGuard) from anywhere, egress everything; **no TCP port** |
-| IAM role and instance profile | trusted by EC2; four inline policies and nothing else: `ssm:GetParameter(s)` on the one `SSMAuthKeyPath` parameter; `kms:Decrypt` on keys aliased `alias/aws/ssm`; `ec2:ModifyInstanceAttribute` and `ec2:DescribeInstances` (to turn off the source/destination check on itself); `autoscaling:CompleteLifecycleAction` on its own ASG. No managed policy |
+| IAM role and instance profile | trusted by EC2; three inline policies and nothing else: `ssm:GetParameter(s)` on the one `SSMAuthKeyPath` parameter; `kms:Decrypt` on keys aliased `alias/aws/ssm`; `autoscaling:CompleteLifecycleAction` on its own ASG. No EC2 permission and no managed policy |
 | launch template | the newest Amazon Linux 2023 arm64 image (see below), `t4g.micro`, the `RootVolume` root EBS volume (8 GiB `gp3`, encrypted, by default), a public address, IMDSv2 required with hop limit 2, the cloud-init user data; each change is a new default version |
 | auto-scaling group | the sizes above; a rolling instance refresh on every launch-template change that launches the replacement first (minimum healthy 100%, maximum healthy 200%, a 300-second warm-up), so a VPC never loses its last router; optional warm pool (`Stopped`) |
 | lifecycle hook | `<name>-launch` on launch: a router is in service only after it has joined; no signal in 900 seconds abandons it |
@@ -433,8 +433,9 @@ optional features:
   the join to the first): installs Tailscale from its signed repository, reads the key
   from `SSMAuthKeyPath`, runs
   `tailscale up --advertise-routes=… --accept-dns=false`, signs the first
-  SSH host certificate when `HOST_CERT=true` (below), turns off the
-  source/destination check and completes the lifecycle action `CONTINUE`.
+  SSH host certificate when `HOST_CERT=true` (below) and completes the
+  lifecycle action `CONTINUE`. It leaves the source/destination check at EC2's
+  default (on): the router masquerades what it forwards into the VPC.
   It does the same on every boot, a warm-pool instance starting into service
   included: its ephemeral tailnet node is gone after weeks stopped, so it
   runs `tailscale up` again with the key and flags of the first boot, waits
