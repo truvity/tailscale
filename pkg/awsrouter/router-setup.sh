@@ -283,9 +283,13 @@ write_join_script() {
   cat >"$ROOT/usr/local/sbin/tailscale-join.sh" <<EOF
 #!/bin/bash
 # Runs on EVERY boot (cloud-final drop-in + bootcmd + runcmd all arm it).
-# Two-phase because of warm pools: the JOIN happens once (marker-gated),
-# but a lifecycle action fires BOTH at warm-pool entry and again when the
-# stopped instance starts into service — completion must run every boot.
+# Because of warm pools, a lifecycle action fires BOTH at warm-pool entry
+# and again when the stopped instance starts into service, and an instance
+# that sat stopped for weeks has lost its ephemeral tailnet node. So every
+# pass joins (tailscale up, then waits until the node is online with its
+# routes advertised) and only then completes the action CONTINUE; a pass
+# that cannot join completes it ABANDON. The marker only records that a
+# pass has succeeded once; nothing branches on it.
 set -uo pipefail
 MARKER=/var/lib/tailscale-join.done
 LOCK=/run/tailscale-join.lock
@@ -311,6 +315,12 @@ else
 fi
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') tailscale-join boot pass (marker: \$([ -f \$MARKER ] && echo present || echo absent))"
 
+# Knobs a test turns down; a router never sets them.
+RETRY_SLEEP=\${JOIN_RETRY_SLEEP:-15}
+READY_ATTEMPTS=\${JOIN_READY_ATTEMPTS:-12}
+READY_SLEEP=\${JOIN_READY_SLEEP:-5}
+BUDGET=\${JOIN_BUDGET_SECONDS:-600}
+
 # The SSH host certificate, signed NOW (hostcert.go): after the router
 # is on the tailnet (the certificate's principal is its tailnet name)
 # and BEFORE the lifecycle action completes, so a router is InService
@@ -323,48 +333,93 @@ sign_host_cert() {
   /usr/local/sbin/openbao-hostcert-boot.sh || true
 }
 
+# complete_hook ends the pending launch lifecycle action with \$1
+# (CONTINUE or ABANDON). No-op (swallowed error) when no lifecycle action
+# is pending, as on every boot of an instance already in service.
 complete_hook() {
   TOKEN=\$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
   INSTANCE_ID=\$(curl -s -H "X-aws-ec2-metadata-token: \$TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-  aws ec2 modify-instance-attribute --instance-id "\$INSTANCE_ID" --no-source-dest-check --region $REGION || true
-  # No-op (swallowed error) when no lifecycle action is pending.
+  if [ "\$1" = CONTINUE ]; then
+    aws ec2 modify-instance-attribute --instance-id "\$INSTANCE_ID" --no-source-dest-check --region $REGION || true
+  fi
   aws autoscaling complete-lifecycle-action \\
     --lifecycle-hook-name $LIFECYCLE_HOOK_NAME \\
     --auto-scaling-group-name $ASG_NAME \\
     --instance-id "\$INSTANCE_ID" \\
-    --lifecycle-action-result CONTINUE \\
+    --lifecycle-action-result "\$1" \\
     --region $REGION || true
 }
 
-if [ -f "\$MARKER" ]; then
-  # Already joined (e.g. during warm-pool entry) — tailscaled reconnects
-  # from persisted state; just complete any pending lifecycle action.
-  systemctl is-active -q tailscaled || systemctl enable --now tailscaled || true
-  sign_host_cert
-  complete_hook
-  echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') hook pass done (already joined)"
-  exit 0
-fi
+# node_ready: tailscaled reports this node Running and online, and its
+# preferences advertise every route in ADVERTISE_ROUTES. Prints nothing
+# of the status or the preferences (the preferences hold the node key).
+node_ready() {
+  tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+st = json.load(sys.stdin)
+sys.exit(0 if st.get("BackendState") == "Running" and (st.get("Self") or {}).get("Online") else 1)
+' || return 1
+  tailscale debug prefs 2>/dev/null | python3 -c '
+import ipaddress, json, sys
+want = {ipaddress.ip_network(r, strict=False) for r in sys.argv[1].split(",")}
+have = {ipaddress.ip_network(r, strict=False) for r in (json.load(sys.stdin).get("AdvertiseRoutes") or [])}
+sys.exit(0 if want <= have else 1)
+' "$ADVERTISE_ROUTES"
+}
 
-for attempt in \$(seq 1 20); do
+# join_tailnet is one attempt at being a working router: tailscaled
+# running, \`tailscale up\` with the key from the parameter store and the
+# same flags every boot, then a bounded wait until the node is online with
+# its routes advertised. It runs on EVERY boot, not only the first: a
+# warm-pool instance that sat stopped for weeks has lost its ephemeral
+# tailnet node, and tailscaled's persisted state alone does not bring it
+# back. With the node still registered the call changes nothing.
+join_tailnet() {
   if ! command -v tailscale >/dev/null 2>&1; then
     dnf install -y tailscale && systemctl enable --now tailscaled
   fi
-  if command -v tailscale >/dev/null 2>&1; then
-    systemctl is-active -q tailscaled || systemctl enable --now tailscaled
-    AUTH_KEY=\$(aws ssm get-parameter --name $SSM_AUTH_KEY_PATH --with-decryption --query Parameter.Value --output text --region $REGION) || AUTH_KEY=""
-    if [ -n "\$AUTH_KEY" ] && tailscale up --authkey "\$AUTH_KEY" --advertise-routes=$ADVERTISE_ROUTES --accept-dns=false; then
-      sign_host_cert
-      complete_hook
-      touch "\$MARKER"
-      echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') joined + hook completed"
-      exit 0
+  command -v tailscale >/dev/null 2>&1 || return 1
+  systemctl is-active -q tailscaled || systemctl enable --now tailscaled
+  AUTH_KEY=\$(aws ssm get-parameter --name $SSM_AUTH_KEY_PATH --with-decryption --query Parameter.Value --output text --region $REGION) || AUTH_KEY=""
+  [ -n "\$AUTH_KEY" ] || return 1
+  # The key is on this command line and in tailscale's own messages only;
+  # the output is scrubbed of it before it reaches the log and the console.
+  out=\$(tailscale up --authkey "\$AUTH_KEY" --advertise-routes=$ADVERTISE_ROUTES --accept-dns=false 2>&1)
+  rc=\$?
+  [ -z "\$out" ] || echo "\${out//"\$AUTH_KEY"/[redacted]}"
+  AUTH_KEY=""
+  out=""
+  [ "\$rc" -eq 0 ] || return 1
+  for ready in \$(seq 1 "\$READY_ATTEMPTS"); do
+    if node_ready; then
+      return 0
     fi
+    sleep "\$READY_SLEEP"
+  done
+  echo "tailscale up returned, but the node is not online with its routes advertised"
+  return 1
+}
+
+# Every pass that ends by completing the hook joins first, and completes it
+# CONTINUE only once the node is online with its routes; a pass that cannot
+# join within its budget ABANDONs the action, so Auto Scaling replaces the
+# instance instead of putting a router that routes nothing in service.
+DEADLINE=\$((SECONDS + BUDGET))
+attempt=0
+while [ "\$SECONDS" -lt "\$DEADLINE" ]; do
+  attempt=\$((attempt + 1))
+  if join_tailnet; then
+    sign_host_cert
+    complete_hook CONTINUE
+    touch "\$MARKER"
+    echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') joined + hook completed"
+    exit 0
   fi
-  echo "attempt \$attempt failed; retrying in 15s"
-  sleep 15
+  echo "attempt \$attempt failed; retrying in \${RETRY_SLEEP}s"
+  sleep "\$RETRY_SLEEP"
 done
-echo "tailscale join failed after 20 attempts"
+complete_hook ABANDON
+echo "tailscale join failed after \$attempt attempts; hook abandoned"
 exit 1
 EOF
   chmod 0755 "$ROOT/usr/local/sbin/tailscale-join.sh"

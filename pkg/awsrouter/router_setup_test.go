@@ -1,6 +1,7 @@
 package awsrouter
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -740,18 +741,50 @@ func TestHostCertBootSkipsWithoutDropIn(t *testing.T) {
 	mustNotExist(t, filepath.Join(tmp, "runs"))
 }
 
-// ── The join signs before it completes the lifecycle action ────────────
+// ── The join joins on every boot, then completes the lifecycle action ──
 
-// runJoin runs the join script router-setup.sh writes, for real, with
-// its absolute paths pointed into a temp dir and tailscale, aws, curl
-// and systemctl stubbed on PATH (each appends its argv to calls). The
-// boot signer is a stub with body signBody, or absent when signBody is
-// empty — a router without HOST_CERT. Returns the output and the calls.
-func runJoin(t *testing.T, marker bool, signBody string) (output, calls string) {
+// joinRun is one run of the join script router-setup.sh writes.
+type joinRun struct {
+	// marker: /var/lib/tailscale-join.done exists, as on an instance that
+	// joined once (a warm-pool instance starting into service).
+	marker bool
+	// signBody is the boot signer stub's body; empty: no signer on disk,
+	// a router without HOST_CERT.
+	signBody string
+	// tailscale is the stub `tailscale`; empty is joinTailscaleStub.
+	tailscale string
+	// aws is the stub `aws`; empty is joinAWSStub.
+	aws string
+	// systemctl is the stub `systemctl`; empty exits 0 for everything.
+	systemctl string
+}
+
+// joinAuthKey is the fake auth key the aws stub returns. It must never reach
+// the join's output.
+const joinAuthKey = "tskey-auth-FAKE0123456789"
+
+// joinTailscaleStub is a tailscale that is online and advertising the
+// routes baseEnv sets: `up` echoes its arguments the way tailscale does when
+// it reports an error, and the two status reads answer with JSON.
+const joinTailscaleStub = `case "$1" in
+  up) echo "tailscale $*"; exit 0 ;;
+  status) echo '{"BackendState":"Running","Self":{"Online":true}}' ;;
+  debug) echo '{"AdvertiseRoutes":["10.0.0.0/16"],"Persist":{"PrivateNodeKey":"privkey:never-printed"}}' ;;
+esac`
+
+const joinAWSStub = `[ "$1" = ssm ] && echo ` + joinAuthKey + `; exit 0`
+
+// runJoin runs the join script for real, with its absolute paths pointed
+// into a temp dir and tailscale, aws, curl, systemctl and sleep stubbed on
+// PATH (each appends its argv to calls). It returns the combined output, the
+// calls and whether the script exited 0.
+func runJoin(t *testing.T, r joinRun) (output, calls string, ok bool) {
 	t.Helper()
 
-	if _, err := exec.LookPath("flock"); err != nil {
-		t.Skip("flock not installed")
+	for _, tool := range []string{"flock", "python3"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " not installed")
+		}
 	}
 
 	root, _ := routerSetupHarness(t, baseEnv, nil, noopSystemFuncs)
@@ -764,42 +797,51 @@ func runJoin(t *testing.T, marker bool, signBody string) (output, calls string) 
 		require.NoError(t, os.WriteFile(filepath.Join(bin, name),
 			[]byte("#!/bin/bash\necho \""+name+" $*\" >> "+shellQuote(log)+"\n"+body+"\n"), 0o755))
 	}
-	stub("tailscale", "exit 0")
-	stub("systemctl", "exit 0")
+	stub("tailscale", cmp.Or(r.tailscale, joinTailscaleStub))
+	stub("systemctl", cmp.Or(r.systemctl, "exit 0"))
 	stub("curl", "echo stub")
-	stub("aws", `[ "$1" = ssm ] && echo tskey-stub; exit 0`)
+	stub("aws", cmp.Or(r.aws, joinAWSStub))
+	stub("sleep", "exit 0")
 
 	signer := filepath.Join(tmp, "openbao-hostcert-boot.sh")
-	if signBody != "" {
+	if r.signBody != "" {
 		require.NoError(t, os.WriteFile(signer,
-			[]byte("#!/bin/bash\necho \"sign\" >> "+shellQuote(log)+"\n"+signBody+"\n"), 0o755))
+			[]byte("#!/bin/bash\necho \"sign\" >> "+shellQuote(log)+"\n"+r.signBody+"\n"), 0o755))
 	}
 
 	markerPath := filepath.Join(tmp, "marker")
-	if marker {
+	if r.marker {
 		require.NoError(t, os.WriteFile(markerPath, nil, 0o644))
 	}
 
 	join := mustRead(t, filepath.Join(root, "usr/local/sbin/tailscale-join.sh"))
-	for _, r := range [][2]string{
+	for _, rep := range [][2]string{
 		{"LOCK=/run/tailscale-join.lock", "LOCK=" + shellQuote(filepath.Join(tmp, "join.lock"))},
 		{"MARKER=/var/lib/tailscale-join.done", "MARKER=" + shellQuote(markerPath)},
 		{"/var/log/tailscale-join.log", filepath.Join(tmp, "join.log")},
 		{"/usr/local/sbin/openbao-hostcert-boot.sh", signer},
 	} {
-		require.Contains(t, join, r[0])
-		join = strings.ReplaceAll(join, r[0], r[1])
+		require.Contains(t, join, rep[0])
+		join = strings.ReplaceAll(join, rep[0], rep[1])
 	}
 
 	script := filepath.Join(tmp, "tailscale-join.sh")
 	require.NoError(t, os.WriteFile(script, []byte(join), 0o755))
 
 	cmd := exec.Command("bash", script)
-	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+":"+os.Getenv("PATH"),
+		// Small bounds so a join that cannot succeed gives up at once.
+		"JOIN_READY_ATTEMPTS=3", "JOIN_BUDGET_SECONDS=1",
+	)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
 
-	return string(out), mustRead(t, log)
+	// The marker is written once a pass has succeeded.
+	if err == nil {
+		require.FileExists(t, markerPath)
+	}
+
+	return string(out), mustRead(t, log), err == nil
 }
 
 // assertOrder checks each of want appears in calls, in that order.
@@ -815,38 +857,149 @@ func assertOrder(t *testing.T, calls string, want ...string) {
 	}
 }
 
+const (
+	joinUp       = "tailscale up --authkey " + joinAuthKey + " --advertise-routes=10.0.0.0/16 --accept-dns=false"
+	joinContinue = "--lifecycle-action-result CONTINUE"
+	joinAbandon  = "--lifecycle-action-result ABANDON"
+)
+
 func TestJoinScriptSignsHostCertBeforeCompletingHook(t *testing.T) {
 	t.Run("first join", func(t *testing.T) {
-		out, calls := runJoin(t, false, "exit 0")
+		out, calls, ok := runJoin(t, joinRun{signBody: "exit 0"})
+		require.True(t, ok, out)
 		assert.Contains(t, out, "joined + hook completed")
-		assertOrder(t, calls, "tailscale up", "sign", "aws autoscaling complete-lifecycle-action")
+		assertOrder(t, calls, joinUp, "sign", "aws autoscaling complete-lifecycle-action")
 	})
 
-	// A warm-pool instance joined at warm-pool entry; starting into
-	// service re-signs, so it is never InService on an expired
-	// certificate from a long stop.
+	// A warm-pool instance starting into service re-signs, so it is never
+	// InService on an expired certificate from a long stop.
 	t.Run("already joined", func(t *testing.T) {
-		out, calls := runJoin(t, true, "exit 0")
-		assert.Contains(t, out, "hook pass done (already joined)")
-		assert.NotContains(t, calls, "tailscale up")
-		assertOrder(t, calls, "sign", "aws autoscaling complete-lifecycle-action")
+		out, calls, ok := runJoin(t, joinRun{marker: true, signBody: "exit 0"})
+		require.True(t, ok, out)
+		assertOrder(t, calls, joinUp, "sign", "aws autoscaling complete-lifecycle-action")
 	})
 }
 
 // The signer exiting non-zero (it never should) still never stops the
 // join: the lifecycle action completes and the marker is written.
 func TestJoinScriptContinuesWhenSigningFails(t *testing.T) {
-	out, calls := runJoin(t, false, "exit 1")
+	out, calls, ok := runJoin(t, joinRun{signBody: "exit 1"})
+	require.True(t, ok, out)
 	assert.Contains(t, out, "joined + hook completed")
-	assertOrder(t, calls, "tailscale up", "sign", "aws autoscaling complete-lifecycle-action")
+	assertOrder(t, calls, joinUp, "sign", joinContinue)
 }
 
 // No HOST_CERT: no signer on disk, and the join is what it always was.
 func TestJoinScriptWithoutHostCert(t *testing.T) {
-	out, calls := runJoin(t, false, "")
+	out, calls, ok := runJoin(t, joinRun{})
+	require.True(t, ok, out)
 	assert.Contains(t, out, "joined + hook completed")
 	assert.NotContains(t, calls, "sign")
-	assertOrder(t, calls, "tailscale up", "aws autoscaling complete-lifecycle-action")
+	assertOrder(t, calls, joinUp, joinContinue)
+}
+
+// A warm-pool instance that sat stopped for weeks has lost its ephemeral
+// node. Its pass joins again, with the key from the parameter store and the
+// flags of the first boot, waits until the node is online with its routes,
+// and only then continues the lifecycle action.
+func TestJoinScriptRejoinsOnAWarmPoolResume(t *testing.T) {
+	out, calls, ok := runJoin(t, joinRun{marker: true})
+	require.True(t, ok, out)
+	assert.Contains(t, out, "(marker: present)")
+	assertOrder(t, calls,
+		"systemctl is-active -q tailscaled",
+		"aws ssm get-parameter --name /tailscale/acme/auth-key --with-decryption",
+		joinUp,
+		"tailscale status --json",
+		"tailscale debug prefs",
+		joinContinue,
+	)
+	assert.NotContains(t, calls, joinAbandon)
+}
+
+// The same pass on a first boot: the marker changes nothing about what runs.
+func TestJoinScriptRunsTheSamePassWithAndWithoutTheMarker(t *testing.T) {
+	_, first, ok1 := runJoin(t, joinRun{})
+	_, resumed, ok2 := runJoin(t, joinRun{marker: true})
+	require.True(t, ok1 && ok2)
+	assert.Equal(t, first, resumed)
+}
+
+// tailscaled that is not running is started before `tailscale up`.
+func TestJoinScriptStartsTailscaled(t *testing.T) {
+	out, calls, ok := runJoin(t, joinRun{marker: true, systemctl: `[ "$1" = is-active ] && exit 3; exit 0`})
+	require.True(t, ok, out)
+	assertOrder(t, calls, "systemctl enable --now tailscaled", joinUp, joinContinue)
+}
+
+// The auth key reaches `tailscale up` and nothing else: not the log, not
+// the serial console, not the status reads (which hold the node key).
+func TestJoinScriptNeverPrintsTheAuthKey(t *testing.T) {
+	for _, marker := range []bool{false, true} {
+		out, _, ok := runJoin(t, joinRun{marker: marker})
+		require.True(t, ok, out)
+		assert.NotContains(t, out, joinAuthKey)
+		assert.Contains(t, out, "tailscale up --authkey [redacted] --advertise-routes=10.0.0.0/16")
+		assert.NotContains(t, out, "never-printed")
+	}
+}
+
+// The node is not online yet when `tailscale up` returns: the pass polls,
+// and continues once it is.
+func TestJoinScriptWaitsUntilTheNodeIsOnline(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "polls")
+	ts := strings.Replace(joinTailscaleStub, `status) echo '{"BackendState":"Running","Self":{"Online":true}}' ;;`,
+		`status) n=$(cat `+shellQuote(counter)+` 2>/dev/null || echo 0); echo $((n+1)) > `+shellQuote(counter)+`;
+    if [ "$n" -ge 2 ]; then echo '{"BackendState":"Running","Self":{"Online":true}}'; else echo '{"BackendState":"Starting","Self":{"Online":false}}'; fi ;;`, 1)
+	require.NotEqual(t, joinTailscaleStub, ts)
+
+	out, calls, ok := runJoin(t, joinRun{tailscale: ts})
+	require.True(t, ok, out)
+	assert.Equal(t, 3, strings.Count(calls, "tailscale status --json"))
+	assertOrder(t, calls, joinUp, "tailscale status --json", joinContinue)
+}
+
+// A pass that cannot get the node online with its routes abandons the
+// lifecycle action (so Auto Scaling replaces the instance) and never
+// continues it.
+func TestJoinScriptAbandonsWhenTheNodeNeverComesUp(t *testing.T) {
+	for name, r := range map[string]joinRun{
+		"offline": {tailscale: strings.Replace(joinTailscaleStub, `"Online":true`, `"Online":false`, 1)},
+		"not running": {
+			tailscale: strings.Replace(joinTailscaleStub, `"BackendState":"Running"`, `"BackendState":"NeedsLogin"`, 1),
+		},
+		"routes not advertised": {
+			tailscale: strings.Replace(joinTailscaleStub, `["10.0.0.0/16"]`, `[]`, 1),
+		},
+		"only some routes": {
+			tailscale: strings.Replace(joinTailscaleStub, `["10.0.0.0/16"]`, `["10.1.0.0/16"]`, 1),
+		},
+		"tailscale up fails": {
+			tailscale: strings.Replace(joinTailscaleStub, `up) echo "tailscale $*"; exit 0 ;;`, `up) echo "tailscale $*"; exit 1 ;;`, 1),
+		},
+		"no auth key":          {aws: "exit 0"},
+		"resumed, no auth key": {marker: true, aws: "exit 0"},
+		"resumed, offline": {
+			marker:    true,
+			tailscale: strings.Replace(joinTailscaleStub, `"Online":true`, `"Online":false`, 1),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, calls, ok := runJoin(t, r)
+			assert.False(t, ok, "a join that never worked must fail the pass:\n%s", out)
+			assert.Contains(t, out, "hook abandoned")
+			assert.NotContains(t, out, joinAuthKey)
+			assert.Contains(t, calls, joinAbandon)
+			assert.NotContains(t, calls, joinContinue)
+			assert.NotContains(t, calls, "sign", "no host certificate for a router that is not on the tailnet")
+		})
+	}
+}
+
+// With no auth key there is nothing to call `tailscale up` with.
+func TestJoinScriptNeverUpsWithoutAKey(t *testing.T) {
+	_, calls, _ := runJoin(t, joinRun{marker: true, aws: "exit 0"})
+	assert.NotContains(t, calls, "tailscale up")
 }
 
 // ── Swap: only when the disk has room, never a failed setup ────────────

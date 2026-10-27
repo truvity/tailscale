@@ -7,12 +7,10 @@
       "instanceRefresh": {
         "preferences": {
           "instanceWarmup": "300",
-          "minHealthyPercentage": 0
+          "maxHealthyPercentage": 200,
+          "minHealthyPercentage": 100
         },
-        "strategy": "Rolling",
-        "triggers": [
-          "launch_template"
-        ]
+        "strategy": "Rolling"
       },
       "launchTemplate": {
         "id": "tailscale-lt-id",
@@ -64,56 +62,6 @@
   },
   {
     "inputs": {
-      "alarmDescription": "Tailscale router CPU \u003e 90% for 15 minutes",
-      "comparisonOperator": "GreaterThanThreshold",
-      "dimensions": {
-        "AutoScalingGroupName": "example-tailscale-acme"
-      },
-      "evaluationPeriods": 3,
-      "metricName": "CPUUtilization",
-      "name": "example-tailscale-acme-cpu-high",
-      "namespace": "AWS/EC2",
-      "period": 300,
-      "statistic": "Average",
-      "tags": {
-        "Environment": "example",
-        "ManagedBy": "pulumi",
-        "Name": "example-tailscale-acme-cpu-high"
-      },
-      "threshold": 90
-    },
-    "name": "tailscale-cpu-alarm",
-    "parent": "pulumi:pulumi:Stack::p-s",
-    "provider": "pulumi:providers:aws::aws",
-    "type": "aws:cloudwatch/metricAlarm:MetricAlarm"
-  },
-  {
-    "inputs": {
-      "alarmDescription": "Tailscale router instance status check failed",
-      "comparisonOperator": "GreaterThanThreshold",
-      "dimensions": {
-        "AutoScalingGroupName": "example-tailscale-acme"
-      },
-      "evaluationPeriods": 2,
-      "metricName": "StatusCheckFailed",
-      "name": "example-tailscale-acme-status-check",
-      "namespace": "AWS/EC2",
-      "period": 60,
-      "statistic": "Maximum",
-      "tags": {
-        "Environment": "example",
-        "ManagedBy": "pulumi",
-        "Name": "example-tailscale-acme-status-check"
-      },
-      "threshold": 0
-    },
-    "name": "tailscale-status-alarm",
-    "parent": "pulumi:pulumi:Stack::p-s",
-    "provider": "pulumi:providers:aws::aws",
-    "type": "aws:cloudwatch/metricAlarm:MetricAlarm"
-  },
-  {
-    "inputs": {
       "blockDeviceMappings": [
         {
           "deviceName": "/dev/xvda",
@@ -161,7 +109,7 @@
         "Name": "example-tailscale-acme"
       },
       "updateDefaultVersion": true,
-      "userData": "sha256:bf27f1127b984b3ad122e369b0ae1ee14ecb497d7956dee83e7c7c0132672b6a"
+      "userData": "sha256:cd630116a521dbab4fb291cd927a31bfd7de7b0a5a6dd2698f83c9b7af46d9eb"
     },
     "name": "tailscale-lt",
     "parent": "pulumi:pulumi:Stack::p-s",

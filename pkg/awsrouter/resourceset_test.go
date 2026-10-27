@@ -15,6 +15,7 @@ import (
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,8 +24,9 @@ import (
 // type, logical name, parent, provider and inputs. testdata/handbuilt/
 // holds the same record taken from the hand-built fleet of v1.26.2, before
 // it moved onto github.com/truvity/asg; it is never regenerated, and
-// TestStepAKeepsTheHandBuiltResourceSet compares the fleet with it: the
-// proof that a stack's next preview replaces nothing.
+// TestStepBChangesTheHandBuiltResourceSetAsDocumented compares the fleet
+// with it: the proof that a stack's next preview replaces nothing and
+// changes only what the changelog says.
 //
 // This repository is public: the mocked account id is built at run time
 // and written to the goldens as a placeholder, and the user-data, which
@@ -218,33 +220,71 @@ func TestResourceSetIsPinned(t *testing.T) {
 	}
 }
 
-// stepADelta is everything the move onto github.com/truvity/asg adds to
-// the hand-built resource set: three inputs of the Auto Scaling group,
-// and nothing else. healthCheckType EC2 and healthCheckGracePeriod 300
-// are the values every live group already has (AWS's and the provider's
-// defaults), so they plan no change; waitForCapacityTimeout "0" (asg
-// v0.4.2) exists only in the provider, so it is an in-place update of the
-// state that calls no AWS API and starts no refresh.
-var stepADelta = map[string]map[string]any{
-	"aws:autoscaling/group:Group": {
-		"healthCheckGracePeriod": float64(300),
-		"healthCheckType":        "EC2",
-		"waitForCapacityTimeout": "0",
+// stepAGroupDelta is everything the move onto github.com/truvity/asg and
+// the router changes after it add to the hand-built Auto Scaling group.
+// healthCheckType EC2 and healthCheckGracePeriod 300 are the values every
+// live group already has (AWS's and the provider's defaults), so they plan
+// no change; waitForCapacityTimeout "0" (asg v0.4.2) exists only in the
+// provider, so it is an in-place update of the state that calls no AWS API
+// and starts no refresh.
+var stepAGroupDelta = map[string]any{
+	"healthCheckGracePeriod": float64(300),
+	"healthCheckType":        "EC2",
+	"waitForCapacityTimeout": "0",
+}
+
+// stepBRefresh is the group's instance refresh now: launch the replacement
+// before ending a router, never fewer than all of them in service, and no
+// trigger named (the hand-built group named launch_template, which Auto
+// Scaling does anyway).
+var stepBRefresh = map[string]any{
+	"strategy": "Rolling",
+	"preferences": map[string]any{
+		"minHealthyPercentage": float64(100),
+		"maxHealthyPercentage": float64(200),
+		"instanceWarmup":       "300",
 	},
 }
 
-// TestStepAKeepsTheHandBuiltResourceSet: the same resources (type, logical
-// name, parent, provider) as the hand-built fleet, every input the same,
-// except stepADelta's added group inputs.
-func TestStepAKeepsTheHandBuiltResourceSet(t *testing.T) {
+// The two CloudWatch alarms of the hand-built fleet, deleted by step B.
+var stepBDeleted = map[string]bool{
+	"aws:cloudwatch/metricAlarm:MetricAlarm": true,
+}
+
+// TestStepBChangesTheHandBuiltResourceSetAsDocumented: against the record of
+// the hand-built fleet, a fleet now has
+//   - no CloudWatch alarm (they are deleted);
+//   - on its Auto Scaling group, stepAGroupDelta's inputs and stepBRefresh
+//     in place of the old refresh, and nothing else;
+//   - a launch template whose user data differs (the join script is new)
+//     and nothing else;
+//   - every other resource unchanged: same type, logical name, parent,
+//     provider and inputs.
+//
+// The IAM policies are unchanged here; narrowing them is a separate step.
+func TestStepBChangesTheHandBuiltResourceSetAsDocumented(t *testing.T) {
 	for name, c := range resourceSetCases(t) {
 		t.Run(name, func(t *testing.T) {
 			raw, err := os.ReadFile(filepath.Join("testdata", "handbuilt", "resources-"+name+".json"))
 			require.NoError(t, err)
 
-			var old, now []map[string]any
-			require.NoError(t, json.Unmarshal(raw, &old))
+			var all, old, now []map[string]any
+			require.NoError(t, json.Unmarshal(raw, &all))
 			require.NoError(t, json.Unmarshal([]byte(recordResourceSet(t, c).dump(t)), &now))
+
+			deleted := 0
+
+			for _, r := range all {
+				if stepBDeleted[r["type"].(string)] {
+					deleted++
+
+					continue
+				}
+
+				old = append(old, r)
+			}
+
+			require.Equal(t, 2, deleted, "the hand-built fleet had two alarms")
 			require.Len(t, now, len(old), "the resource count changed")
 
 			for i := range old {
@@ -256,14 +296,42 @@ func TestStepAKeepsTheHandBuiltResourceSet(t *testing.T) {
 				oldIn := old[i]["inputs"].(map[string]any)
 				nowIn := now[i]["inputs"].(map[string]any)
 
-				for k, v := range stepADelta[typ] {
-					require.NotContains(t, oldIn, k, "%s %s: the hand-built fleet already set %s", typ, old[i]["name"], k)
-					require.Equal(t, v, nowIn[k], "%s %s: %s", typ, old[i]["name"], k)
-					delete(nowIn, k)
+				switch typ {
+				case "aws:autoscaling/group:Group":
+					for k, v := range stepAGroupDelta {
+						require.NotContains(t, oldIn, k, "the hand-built group already set %s", k)
+						require.Equal(t, v, nowIn[k], k)
+						delete(nowIn, k)
+					}
+
+					require.Equal(t, stepBRefresh, nowIn["instanceRefresh"], "instanceRefresh")
+					require.NotEqual(t, oldIn["instanceRefresh"], nowIn["instanceRefresh"])
+					delete(oldIn, "instanceRefresh")
+					delete(nowIn, "instanceRefresh")
+				case "aws:ec2/launchTemplate:LaunchTemplate":
+					require.NotEqual(t, oldIn["userData"], nowIn["userData"], "the join script changed the user data")
+					delete(oldIn, "userData")
+					delete(nowIn, "userData")
 				}
 
 				require.Equal(t, oldIn, nowIn, "%s %s: inputs", typ, old[i]["name"])
 			}
 		})
+	}
+}
+
+// A refresh that launches the replacement before it ends a router needs room
+// for one extra instance, so the group's maximum is at least Desired+1.
+func TestMaxLeavesRoomForARefresh(t *testing.T) {
+	for _, tc := range []struct{ min, desired, max, want int }{
+		{0, 0, 0, 2}, // the zero config: one router, room for a second
+		{1, 1, 1, 2}, // a maximum equal to the desired size is raised
+		{1, 3, 3, 4},
+		{1, 3, 0, 4},
+		{1, 1, 2, 2}, // already room: kept
+		{1, 2, 6, 6}, // more room than needed: kept
+	} {
+		got := TailscaleInstanceConfig{Min: tc.min, Desired: tc.desired, Max: tc.max}.sizes()
+		assert.Equal(t, tc.want, got.max, "min %d desired %d max %d", tc.min, tc.desired, tc.max)
 	}
 }

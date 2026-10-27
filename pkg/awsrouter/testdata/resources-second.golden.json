@@ -7,12 +7,10 @@
       "instanceRefresh": {
         "preferences": {
           "instanceWarmup": "300",
-          "minHealthyPercentage": 50
+          "maxHealthyPercentage": 200,
+          "minHealthyPercentage": 100
         },
-        "strategy": "Rolling",
-        "triggers": [
-          "launch_template"
-        ]
+        "strategy": "Rolling"
       },
       "launchTemplate": {
         "id": "other-tailscale-lt-id",
@@ -69,56 +67,6 @@
   },
   {
     "inputs": {
-      "alarmDescription": "Tailscale router CPU \u003e 90% for 15 minutes",
-      "comparisonOperator": "GreaterThanThreshold",
-      "dimensions": {
-        "AutoScalingGroupName": "example-tailscale-other"
-      },
-      "evaluationPeriods": 3,
-      "metricName": "CPUUtilization",
-      "name": "example-tailscale-other-cpu-high",
-      "namespace": "AWS/EC2",
-      "period": 300,
-      "statistic": "Average",
-      "tags": {
-        "Environment": "example",
-        "ManagedBy": "pulumi",
-        "Name": "example-tailscale-other-cpu-high"
-      },
-      "threshold": 90
-    },
-    "name": "other-tailscale-cpu-alarm",
-    "parent": "pulumi:pulumi:Stack::p-s",
-    "provider": "pulumi:providers:aws::aws",
-    "type": "aws:cloudwatch/metricAlarm:MetricAlarm"
-  },
-  {
-    "inputs": {
-      "alarmDescription": "Tailscale router instance status check failed",
-      "comparisonOperator": "GreaterThanThreshold",
-      "dimensions": {
-        "AutoScalingGroupName": "example-tailscale-other"
-      },
-      "evaluationPeriods": 2,
-      "metricName": "StatusCheckFailed",
-      "name": "example-tailscale-other-status-check",
-      "namespace": "AWS/EC2",
-      "period": 60,
-      "statistic": "Maximum",
-      "tags": {
-        "Environment": "example",
-        "ManagedBy": "pulumi",
-        "Name": "example-tailscale-other-status-check"
-      },
-      "threshold": 0
-    },
-    "name": "other-tailscale-status-alarm",
-    "parent": "pulumi:pulumi:Stack::p-s",
-    "provider": "pulumi:providers:aws::aws",
-    "type": "aws:cloudwatch/metricAlarm:MetricAlarm"
-  },
-  {
-    "inputs": {
       "blockDeviceMappings": [
         {
           "deviceName": "/dev/xvda",
@@ -166,7 +114,7 @@
         "Name": "example-tailscale-other"
       },
       "updateDefaultVersion": true,
-      "userData": "sha256:35f469b65e11ef5f9ca372d1ebced1782bd3a7c725e05754986d115e9173b316"
+      "userData": "sha256:6cc3d3f6750d218a506a878fd99b6ded3dfc2ffed5257945508fbfd58be21b6c"
     },
     "name": "other-tailscale-lt",
     "parent": "pulumi:pulumi:Stack::p-s",
