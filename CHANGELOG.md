@@ -5,7 +5,7 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
-## Unreleased
+## v1.29.0
 
 - **The router role can no longer change its own source/destination check, and the join no longer tries.** The `ec2-source-dest-check` inline policy (`ec2:ModifyInstanceAttribute` and `ec2:DescribeInstances`, on every resource) is gone from the role, and `tailscale-join.sh` no longer calls `aws ec2 modify-instance-attribute --no-source-dest-check`. The role keeps three inline policies: the auth-key parameter, `kms:Decrypt` on the default SSM key, and completing its own launch lifecycle action. A router now keeps the check at EC2's default, on, and relies on the masquerading firewalld already sets up: traffic from the tailnet into the VPC leaves the router with the router's own address, so the check passes it. What that does not cover is a VPC-initiated flow toward a tailnet address that is routed to the router without being translated, and a peered CIDR (`ExtraCIDRs`) reached through the router, which a consumer must test itself. The next `pulumi up` removes the inline policy from the role in place. A running router keeps the check disabled until it is replaced; the routers a refresh launches have it on.
 
