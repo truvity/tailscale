@@ -195,41 +195,41 @@
         }
       }
     },
-    "just-lsp@0.9.0": {
-      "last_modified": "2026-10-02T22:55:44Z",
-      "resolved": "github:NixOS/nixpkgs/55ba7f49ef2962b42cbd126522b7df5f95037679#just-lsp",
+    "just-lsp@0.10.0": {
+      "last_modified": "2026-10-27T21:33:45Z",
+      "resolved": "github:NixOS/nixpkgs/f05535a0efcb2134c478d1e88434fadf486d42b5#just-lsp",
       "source": "devbox-search",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "systems": {
         "aarch64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/b3vlvwalwvwnfiaiwbxbrx89mbcmrln8-just-lsp-0.9.0",
+              "path": "/nix/store/mpiagdg6j9rpzxzcbpqlyf4mkqv9985h-just-lsp-0.10.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/b3vlvwalwvwnfiaiwbxbrx89mbcmrln8-just-lsp-0.9.0"
+          "store_path": "/nix/store/mpiagdg6j9rpzxzcbpqlyf4mkqv9985h-just-lsp-0.10.0"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/0lsi1xdvbap8whmn90m3h3bjyvsvdj69-just-lsp-0.9.0",
+              "path": "/nix/store/pgj6kzd5bfjvpy6i14ksv4y4016xq5wr-just-lsp-0.10.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/0lsi1xdvbap8whmn90m3h3bjyvsvdj69-just-lsp-0.9.0"
+          "store_path": "/nix/store/pgj6kzd5bfjvpy6i14ksv4y4016xq5wr-just-lsp-0.10.0"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/7d13gnr8rj72s5jndzrckjzjlc1x1qbw-just-lsp-0.9.0",
+              "path": "/nix/store/i737l748499zjrn9a1g94lwhvg4hd6wl-just-lsp-0.10.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/7d13gnr8rj72s5jndzrckjzjlc1x1qbw-just-lsp-0.9.0"
+          "store_path": "/nix/store/i737l748499zjrn9a1g94lwhvg4hd6wl-just-lsp-0.10.0"
         }
       }
     },
