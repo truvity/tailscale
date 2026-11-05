@@ -128,13 +128,28 @@ func TestNonMemberClusterFeedsTheNetworkRuleOnly(t *testing.T) {
 }
 
 func TestNoRuleFromARouterTag(t *testing.T) {
-	_, doc := build(t, examplePolicy())
+	p := examplePolicy()
+	_, doc := build(t, p)
 
 	// Tailscale's filter is stateful, so replies to a member's
 	// connection need no rule. A router tag is only ever a destination:
 	// a rule from it to autogroup:member would let a router, or anyone
 	// holding its auth key, open connections to every member device.
-	routerTags := []string{"tag:devel-router", "tag:prod-router", "tag:k8s-devel-router", "tag:k8s-prod-router"}
+	// The tags come from the policy itself, so a router added to
+	// examplePolicy is covered without editing this test.
+	var routerTags []string
+	for _, n := range p.Networks {
+		routerTags = append(routerTags, "tag:"+n.RouterTag)
+	}
+
+	for i := range p.Clusters {
+		if p.Clusters[i].Member {
+			routerTags = append(routerTags, "tag:"+p.Clusters[i].routerTag())
+		}
+	}
+
+	// Refuse an empty sweep: two network routers, two member clusters.
+	require.ElementsMatch(t, []string{"tag:devel-router", "tag:prod-router", "tag:k8s-devel-router", "tag:k8s-prod-router"}, routerTags)
 
 	for _, r := range doc.ACLs {
 		for _, src := range r.Src {

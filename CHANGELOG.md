@@ -7,7 +7,22 @@ together at every version.
 
 ## Unreleased
 
-- **`pkg/acl` no longer renders a rule from a router tag to every tailnet member.** Each network router and each member Kubernetes router used to get `tag:<router>` → `autogroup:member:*`, described as return traffic. Tailscale's filter is stateful: the replies to a connection a member opens are allowed without a rule. The rules only let a router, or anyone holding a router's auth key, open connections to every member device. A rendered policy now has one rule fewer per network and one fewer per member cluster, and nothing else changes; the next apply of a tailnet's policy removes them. A consumer that relies on a router opening connections to member devices (a VPC host reaching a tailnet address through a router that does not translate it, say) adds that rule back itself, narrowed to the devices and ports it needs. A policy that grants nothing at all now renders `"acls": []` instead of `"acls": null`.
+- **`pkg/acl` no longer renders a rule from a router tag to every tailnet
+  member.** Each network router and each member Kubernetes router used to get
+  `tag:<router>` → `autogroup:member:*`, described as return traffic.
+  Tailscale's filter is stateful: the replies to a connection a member opens
+  are allowed without a rule. The rules only let a router, or anyone holding a
+  router's auth key, open connections to every member device. A rendered
+  policy now has one rule fewer per network and one fewer per member cluster,
+  and nothing else changes; the next apply of a tailnet's policy removes them.
+  A consumer that relies on a router opening connections to member devices (a
+  process on the router itself, or something translated to the router's
+  tailnet address) adds that rule back itself, narrowed to the devices and
+  ports it needs. Traffic from a VPC host that reaches the tailnet through a
+  router without being translated keeps the host's own address, so the
+  removed rule never matched it; such a flow needs the subnet CIDR as the
+  source. A policy that grants nothing at all now renders `"acls": []` instead
+  of `"acls": null`.
 
 ## v1.29.1
 
