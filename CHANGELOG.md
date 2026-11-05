@@ -5,7 +5,7 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
-## Unreleased
+## v1.30.0
 
 - **A router fleet can run in subnets of its own.** `awsrouter.FleetArgs`
   gains `Subnets`, one `FleetSubnet` (zone and IPv4 CIDR) per zone. With it
