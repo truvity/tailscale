@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
+	"strings"
 
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/ec2"
@@ -66,8 +68,48 @@ type (
 		// router-setup.sh from (see TailscaleInstanceConfig).
 		RouterSetupVersion string
 
+		// Subnets, when set, are subnets of the fleet's own, one per zone:
+		// DeployFleet creates them in the VPC, gives them the route table of
+		// the VPC's public subnets and runs the routers in them alone. A
+		// router masquerades what it forwards into the VPC to its own
+		// address, so the fleet's traffic then comes from these CIDRs only,
+		// and a network policy can tell one tailnet's routers from another's
+		// and from anything else in the public subnets. Changing them (or
+		// setting them on a fleet that ran in the public subnets) replaces
+		// the routers with an instance refresh, launch-first. Empty, the
+		// default: the routers run in the VPC's public subnets, as before.
+		// See ValidateSubnets for the rules.
+		Subnets []FleetSubnet
+
 		Network NetworkTags
 	}
+
+	// FleetSubnet is one zone's subnet of a fleet that runs in subnets of
+	// its own (FleetArgs.Subnets).
+	FleetSubnet struct {
+		// AvailabilityZone is the zone's name, e.g. "eu-west-1a".
+		AvailabilityZone string
+		// CIDR is the subnet's IPv4 block, inside the VPC's CIDR and in
+		// none of its other subnets: AWS refuses an overlap at apply time.
+		// The smallest subnet AWS allows, a /28, holds 11 routers (AWS
+		// keeps 5 addresses of every subnet): room for the desired
+		// capacity, the warm pool and a refresh's extra router.
+		CIDR string
+	}
+)
+
+// RouterSubnetType is the value of the subnet type tag
+// (NetworkTags.SubnetTypeKey) on the subnets DeployFleet creates for a fleet
+// (FleetArgs.Subnets). It is not the public value on purpose: a lookup of
+// the VPC's public subnets, this package's own or a load balancer
+// controller's, does not find them.
+const RouterSubnetType = "tailscale-router"
+
+// subnetPrefixMin and subnetPrefixMax bound a fleet subnet's prefix length:
+// AWS allows /16 to /28.
+const (
+	subnetPrefixMin = 16
+	subnetPrefixMax = 28
 )
 
 func (t NetworkTags) withDefaults() NetworkTags {
@@ -111,6 +153,63 @@ func (a FleetArgs) ValidateRoutes() error {
 	return nil
 }
 
+// ValidateSubnets refuses Subnets that are not IPv4 CIDRs of /16 to /28
+// inside VPCCIDR, that overlap each other, or that name a zone twice or no
+// zone at all. Empty Subnets are valid: the fleet runs in the public
+// subnets.
+func (a FleetArgs) ValidateSubnets() error {
+	if len(a.Subnets) == 0 {
+		return nil
+	}
+
+	vpc, err := netip.ParsePrefix(a.VPCCIDR)
+	if err != nil {
+		return fmt.Errorf("awsrouter: VPC CIDR %q is not a CIDR: %w", a.VPCCIDR, err)
+	}
+
+	zones := map[string]bool{}
+	prefixes := make([]netip.Prefix, len(a.Subnets))
+
+	for i, sn := range a.Subnets {
+		if sn.AvailabilityZone == "" {
+			return fmt.Errorf("awsrouter: subnet %q names no availability zone", sn.CIDR)
+		}
+
+		if zones[sn.AvailabilityZone] {
+			return fmt.Errorf("awsrouter: availability zone %q has two subnets", sn.AvailabilityZone)
+		}
+
+		zones[sn.AvailabilityZone] = true
+
+		p, err := netip.ParsePrefix(sn.CIDR)
+		if err != nil {
+			return fmt.Errorf("awsrouter: subnet %q is not a CIDR: %w", sn.CIDR, err)
+		}
+
+		if !p.Addr().Is4() || p.Masked() != p {
+			return fmt.Errorf("awsrouter: subnet %q is not an IPv4 network address", sn.CIDR)
+		}
+
+		if p.Bits() < subnetPrefixMin || p.Bits() > subnetPrefixMax {
+			return fmt.Errorf("awsrouter: subnet %q: prefix length /%d is outside /%d to /%d", sn.CIDR, p.Bits(), subnetPrefixMin, subnetPrefixMax)
+		}
+
+		if p.Bits() < vpc.Bits() || !vpc.Contains(p.Addr()) {
+			return fmt.Errorf("awsrouter: subnet %q is not inside the VPC CIDR %q", sn.CIDR, a.VPCCIDR)
+		}
+
+		for j := range i {
+			if prefixes[j].Overlaps(p) {
+				return fmt.Errorf("awsrouter: subnet %q overlaps %q", sn.CIDR, a.Subnets[j].CIDR)
+			}
+		}
+
+		prefixes[i] = p
+	}
+
+	return nil
+}
+
 // InstanceConfig is the TailscaleInstanceConfig for the fleet, once the
 // network is known.
 //
@@ -140,12 +239,17 @@ func (a FleetArgs) InstanceConfig(vpcID pulumi.IDOutput, subnets []pulumi.IDOutp
 }
 
 // DeployFleet looks up the environment's VPC and public subnets by tag and
-// creates the router fleet in them.
+// creates the router fleet in them, or, with FleetArgs.Subnets, in subnets
+// of its own that it creates beside them.
 func DeployFleet(ctx *pulumi.Context, logger *slog.Logger, provider *aws.Provider, args FleetArgs) error {
 	goCtx := ctx.Context()
 	tags := args.Network.withDefaults()
 
 	if err := args.ValidateRoutes(); err != nil {
+		return err
+	}
+
+	if err := args.ValidateSubnets(); err != nil {
 		return err
 	}
 
@@ -189,6 +293,12 @@ func DeployFleet(ctx *pulumi.Context, logger *slog.Logger, provider *aws.Provide
 		subnets[i] = pulumi.ID(id).ToIDOutput()
 	}
 
+	if len(args.Subnets) > 0 {
+		if subnets, err = createFleetSubnets(ctx, provider, args, tags, vpc.Id, public.Ids); err != nil {
+			return err
+		}
+	}
+
 	if _, err := CreateTailscaleInstance(ctx, logger, provider, args.InstanceConfig(pulumi.ID(vpc.Id).ToIDOutput(), subnets)); err != nil {
 		return fmt.Errorf("create tailscale instance: %w", err)
 	}
@@ -196,4 +306,72 @@ func DeployFleet(ctx *pulumi.Context, logger *slog.Logger, provider *aws.Provide
 	logger.InfoContext(goCtx, "Tailscale router deployed successfully", slog.String("environment", args.Environment))
 
 	return nil
+}
+
+// createFleetSubnets creates the fleet's own subnets (FleetArgs.Subnets),
+// in zone order, each associated with the route table of the VPC's public
+// subnets, and returns their IDs. The public subnets must share one route
+// table, explicitly associated: the fleet's subnets get exactly the routes
+// the routers had there (the internet gateway the routers reach the
+// tailnet's coordination and relay servers through, and whatever else the
+// network routes publicly). The subnets assign no public address of their
+// own: the launch template gives each router one. They have no IPv6 block.
+// Their network ACL is the VPC's default one, as for any subnet without an
+// explicit association.
+func createFleetSubnets(ctx *pulumi.Context, provider *aws.Provider, args FleetArgs, tags NetworkTags, vpcID string, publicIDs []string) ([]pulumi.IDOutput, error) {
+	routeTable := ""
+
+	for _, id := range slices.Sorted(slices.Values(publicIDs)) {
+		subnetID := id
+
+		rt, err := ec2.LookupRouteTable(ctx, &ec2.LookupRouteTableArgs{VpcId: &vpcID, SubnetId: &subnetID}, pulumi.Provider(provider))
+		if err != nil {
+			return nil, fmt.Errorf("lookup the route table of public subnet %s: %w", id, err)
+		}
+
+		if routeTable != "" && rt.RouteTableId != routeTable {
+			return nil, fmt.Errorf("the public subnets of %s have more than one route table (%s, %s): a fleet's own subnets need the one they share",
+				args.Environment, routeTable, rt.RouteTableId)
+		}
+
+		routeTable = rt.RouteTableId
+	}
+
+	cfg := args.InstanceConfig(pulumi.ID(vpcID).ToIDOutput(), nil)
+
+	ordered := slices.SortedFunc(slices.Values(args.Subnets), func(a, b FleetSubnet) int {
+		return strings.Compare(a.AvailabilityZone, b.AvailabilityZone)
+	})
+
+	ids := make([]pulumi.IDOutput, 0, len(ordered))
+
+	for _, sn := range ordered {
+		subnet, err := ec2.NewSubnet(ctx, cfg.resourceName("tailscale-subnet-"+sn.AvailabilityZone), &ec2.SubnetArgs{
+			VpcId:               pulumi.String(vpcID),
+			CidrBlock:           pulumi.String(sn.CIDR),
+			AvailabilityZone:    pulumi.String(sn.AvailabilityZone),
+			MapPublicIpOnLaunch: pulumi.Bool(false),
+			Tags: pulumi.StringMap{
+				TagName:             pulumi.String(cfg.baseName() + "-" + sn.AvailabilityZone),
+				tags.EnvironmentKey: pulumi.String(args.Environment),
+				tags.ManagedByKey:   pulumi.String(tags.ManagedByValue),
+				tags.SubnetTypeKey:  pulumi.String(RouterSubnetType),
+				TagTailnet:          pulumi.String(args.Tailnet),
+			},
+		}, pulumi.Provider(provider))
+		if err != nil {
+			return nil, fmt.Errorf("create router subnet %s (%s): %w", sn.CIDR, sn.AvailabilityZone, err)
+		}
+
+		if _, err := ec2.NewRouteTableAssociation(ctx, cfg.resourceName("tailscale-subnet-route-"+sn.AvailabilityZone), &ec2.RouteTableAssociationArgs{
+			SubnetId:     subnet.ID(),
+			RouteTableId: pulumi.String(routeTable),
+		}, pulumi.Provider(provider)); err != nil {
+			return nil, fmt.Errorf("associate router subnet %s with %s: %w", sn.CIDR, routeTable, err)
+		}
+
+		ids = append(ids, subnet.ID())
+	}
+
+	return ids, nil
 }

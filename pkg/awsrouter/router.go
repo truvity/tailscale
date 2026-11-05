@@ -47,6 +47,9 @@ const (
 	TagName        = "Name"
 	TagEnvironment = "Environment"
 	TagManagedBy   = "ManagedBy"
+	// TagTailnet names the tailnet on the subnets of a fleet that runs in
+	// subnets of its own (FleetArgs.Subnets).
+	TagTailnet = "Tailnet"
 	// TagValuePulumi marks resources this package manages.
 	TagValuePulumi = "pulumi"
 
@@ -519,14 +522,15 @@ func fleetBox(config TailscaleInstanceConfig, awsProvider *aws.Provider, account
 		// A refresh launches the replacement router first and ends the old
 		// one only after the replacement is InService, which it is only once
 		// it has joined the tailnet and completed the launch hook: a VPC is
-		// never without a router while the fleet restarts. No trigger is
-		// named; Auto Scaling refreshes on every launch template version
-		// anyway.
+		// never without a router while the fleet restarts. Auto Scaling
+		// refreshes on every launch template version anyway; the one trigger
+		// named is a change of subnets (subnetRefreshTriggers).
 		Refresh: &asg.RefreshArgs{
 			MinHealthyPercentage: refreshMinHealthyPercentage,
 			MaxHealthyPercentage: refreshMaxHealthyPercentage,
 			// 5 min — Tailscale needs time to connect and advertise routes.
 			WarmupSeconds: 300,
+			Triggers:      subnetRefreshTriggers,
 		},
 		IAM: asg.IAMArgs{
 			PermissionsBoundary: pbARN,
@@ -569,6 +573,13 @@ func fleetBox(config TailscaleInstanceConfig, awsProvider *aws.Provider, account
 		},
 	}, nil
 }
+
+// subnetRefreshTriggers are the group's extra instance refresh triggers: a
+// change of the group's subnets replaces the routers (launch-first, like any
+// refresh), so a fleet moved into other subnets, or back, never keeps
+// routers in subnets the group no longer names, which would also keep those
+// subnets from being deleted.
+var subnetRefreshTriggers = []string{"vpc_zone_identifier"}
 
 // The rolling instance refresh keeps every router in service until its
 // replacement is InService: it may launch up to twice the desired capacity
