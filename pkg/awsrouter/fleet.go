@@ -318,7 +318,9 @@ func DeployFleet(ctx *pulumi.Context, logger *slog.Logger, provider *aws.Provide
 // own: the launch template gives each router one. They have no IPv6 block.
 // Their network ACL is the VPC's default one, as for any subnet without an
 // explicit association.
-func createFleetSubnets(ctx *pulumi.Context, provider *aws.Provider, args FleetArgs, tags NetworkTags, vpcID string, publicIDs []string) ([]pulumi.IDOutput, error) {
+func createFleetSubnets(
+	ctx *pulumi.Context, provider *aws.Provider, args FleetArgs, tags NetworkTags, vpcID string, publicIDs []string,
+) ([]pulumi.IDOutput, error) {
 	routeTable := ""
 
 	for _, id := range slices.Sorted(slices.Values(publicIDs)) {
