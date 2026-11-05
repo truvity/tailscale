@@ -5,7 +5,7 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
-## Unreleased
+## v1.29.2
 
 - **`pkg/acl` no longer renders a rule from a router tag to every tailnet
   member.** Each network router and each member Kubernetes router used to get
