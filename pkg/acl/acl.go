@@ -427,7 +427,9 @@ func groupSrc(groups []string) []string {
 }
 
 func rules(networks []Network, clusters []Cluster, netByName map[string]*Network) []rule {
-	var out []rule
+	// Non-nil, so a policy that grants nothing renders "acls": [] rather
+	// than null.
+	out := []rule{}
 
 	// Per-cluster tiers, clusters in name order.
 	for i := range clusters {
@@ -447,11 +449,17 @@ func rules(networks []Network, clusters []Cluster, netByName map[string]*Network
 		}
 	}
 
-	// Network router reachability + return traffic, networks in name
-	// order. Sources are every group with VPC access to ANY cluster on
-	// the network — members and non-members alike, deduplicated and
-	// sorted: those people reach the shared network through this router
-	// regardless of where a given cluster's own router lives.
+	// Network router reachability, networks in name order. Sources are
+	// every group with VPC access to ANY cluster on the network — members
+	// and non-members alike, deduplicated and sorted: those people reach
+	// the shared network through this router regardless of where a given
+	// cluster's own router lives.
+	//
+	// No rule runs the other way, from a router tag to autogroup:member.
+	// Tailscale's filter is stateful: the replies to a connection a
+	// member opens are allowed without one. Such a rule would only let a
+	// router, or anyone holding a router's auth key, open connections to
+	// every member device.
 	for i := range networks {
 		n := &networks[i]
 		tag := "tag:" + n.RouterTag
@@ -480,12 +488,10 @@ func rules(networks []Network, clusters []Cluster, netByName map[string]*Network
 		if len(groups) > 0 {
 			out = append(out, rule{Action: accept, Src: groups, Dst: []string{tag + ":*"}})
 		}
-
-		out = append(out, rule{Action: accept, Src: []string{tag}, Dst: []string{"autogroup:member:*"}})
 	}
 
-	// Kubernetes router reachability + return traffic, clusters in name
-	// order.
+	// Kubernetes router reachability, clusters in name order. As above,
+	// no rule from the router tag to autogroup:member.
 	for i := range clusters {
 		c := &clusters[i]
 		if !c.Member {
@@ -497,8 +503,6 @@ func rules(networks []Network, clusters []Cluster, netByName map[string]*Network
 		if len(c.VPCGroups) > 0 {
 			out = append(out, rule{Action: accept, Src: groupSrc(c.VPCGroups), Dst: []string{tag + ":*"}})
 		}
-
-		out = append(out, rule{Action: accept, Src: []string{tag}, Dst: []string{"autogroup:member:*"}})
 	}
 
 	return out

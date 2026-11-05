@@ -127,19 +127,39 @@ func TestNonMemberClusterFeedsTheNetworkRuleOnly(t *testing.T) {
 	assert.Equal(t, []string{"group:eng@example.com", "group:partner@example.com", "group:qa@example.com"}, develRouterRule.Src)
 }
 
-func TestRouterReturnTraffic(t *testing.T) {
+func TestNoRuleFromARouterTag(t *testing.T) {
 	_, doc := build(t, examplePolicy())
 
-	returns := 0
+	// Tailscale's filter is stateful, so replies to a member's
+	// connection need no rule. A router tag is only ever a destination:
+	// a rule from it to autogroup:member would let a router, or anyone
+	// holding its auth key, open connections to every member device.
+	routerTags := []string{"tag:devel-router", "tag:prod-router", "tag:k8s-devel-router", "tag:k8s-prod-router"}
 
 	for _, r := range doc.ACLs {
-		if len(r.Dst) == 1 && r.Dst[0] == "autogroup:member:*" {
-			returns++
+		for _, src := range r.Src {
+			assert.NotContains(t, routerTags, src, "rule from a router tag: %+v", r)
+		}
+
+		for _, dst := range r.Dst {
+			assert.False(t, strings.HasPrefix(dst, "autogroup:member"), "rule to every member: %+v", r)
 		}
 	}
 
-	// One per network router + one per member k8s router.
-	assert.Equal(t, 4, returns)
+	// What is left: per member cluster its VPC and in-cluster tiers, one
+	// rule per network router, one per member Kubernetes router.
+	assert.Len(t, doc.ACLs, 8)
+}
+
+func TestPolicyWithoutGroupsRendersAnEmptyRuleList(t *testing.T) {
+	s, err := Build(Policy{
+		Networks: []Network{{Name: "devel", VPCCIDR: "10.1.0.0/16", RouterTag: "devel-router"}},
+		Clusters: []Cluster{{Name: "devel", Network: "devel", ServiceCIDR: "172.1.0.0/16", Member: true}},
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, s, `"acls": []`)
+	assert.NotContains(t, s, `"acls": null`)
 }
 
 func TestValidate(t *testing.T) {

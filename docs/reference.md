@@ -90,10 +90,12 @@ For the model in the [README](../README.md#install-and-a-worked-example):
   plus `ExtraTagOwners`.
 - `acls`, in this order: per member cluster, `VPCGroups` → `<VPCCIDR>:*` and
   `InClusterGroups` → `<ServiceCIDR>:*`; per network, every `VPCGroups` of any
-  cluster on it (members and non-members, deduplicated) → `tag:<router>:*`,
-  and the router tag → `autogroup:member:*` for return traffic; per member
-  cluster, `VPCGroups` → its router tag, and its router tag →
-  `autogroup:member:*`.
+  cluster on it (members and non-members, deduplicated) → `tag:<router>:*`;
+  per member cluster, `VPCGroups` → its router tag. None of these has a
+  router tag as its source, and nothing reaches `autogroup:member`:
+  Tailscale's filter is stateful, so replies to a connection a member opens
+  need no rule, and a rule from a router tag to `autogroup:member:*` would
+  let a router open connections to every member device.
 - `autoApprovers.routes`: each `VPCCIDR` for its network's router tag and for
   every member cluster's router on that network; each `ServiceCIDR` for its
   cluster's router tag.
