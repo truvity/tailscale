@@ -5,6 +5,48 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## Unreleased
+
+- **A router fleet can run in subnets of its own.** `awsrouter.FleetArgs`
+  gains `Subnets`, one `FleetSubnet` (zone and IPv4 CIDR) per zone. With it
+  set, `DeployFleet` creates those subnets in the VPC, associates each with
+  the route table the VPC's public subnets share (the same internet route
+  and everything else the network routes publicly), and runs the routers in
+  them alone. A router masquerades what it forwards into the VPC to its own
+  address, so the fleet's traffic then comes from those CIDRs only: a network
+  policy can admit one tailnet's routers without admitting another tailnet's,
+  or anything else that lives in the public subnets. The subnets are tagged
+  `Type=tailscale-router` (`RouterSubnetType`, under
+  `NetworkTags.SubnetTypeKey`) and `Tailnet=<tailnet>`, never the public
+  value, so a lookup of public subnets, this package's own or a load balancer
+  controller's, does not find them. They assign no public address of their
+  own (the launch template gives each router one), have no IPv6 block, and
+  use the VPC's default network ACL. `FleetArgs.ValidateSubnets` refuses a
+  CIDR that is not an IPv4 network address of /16 to /28 inside `VPCCIDR`,
+  two overlapping subnets, and a zone named twice or not at all;
+  `DeployFleet` also refuses public subnets that do not share one explicitly
+  associated route table. A /28 holds 11 routers (AWS keeps five addresses of
+  every subnet).
+- **A change of a fleet's subnets replaces its routers, launch-first.** The
+  router Auto Scaling group's instance refresh names one trigger,
+  `vpc_zone_identifier`, on every fleet. A change of the group's subnets
+  within the same zones is not an instance refresh by itself, so before this
+  a fleet moved into other subnets could keep its routers, and its warm pool,
+  where they were. Now the `pulumi up` that
+  first sets `Subnets`, changes them or drops them updates the group in place
+  and starts an instance refresh: with `MinHealthyPercentage` 100 and
+  `MaxHealthyPercentage` 200, each new router joins the tailnet and completes
+  its launch hook before an old one ends, and the warm pool is replaced after
+  the routers in service. Connections open through an old router end with it,
+  because the new router has another address. A fleet that drops `Subnets`
+  deletes them in the same update, while the refresh is still emptying them:
+  if the delete runs out of time, run the update again once the refresh is
+  done. On a fleet that changes nothing else, the next preview shows one
+  in-place update of the group (the trigger, provider-side only; nothing is
+  refreshed). A fleet with `Subnets` previews, in addition, one subnet and one
+  route table association created per zone, and the group's subnets in the
+  same in-place update.
+
 ## v1.29.2
 
 - **`pkg/acl` no longer renders a rule from a router tag to every tailnet

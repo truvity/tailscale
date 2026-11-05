@@ -234,9 +234,10 @@ var stepAGroupDelta = map[string]any{
 }
 
 // stepBRefresh is the group's instance refresh now: launch the replacement
-// before ending a router, never fewer than all of them in service, and no
-// trigger named (the hand-built group named launch_template, which Auto
-// Scaling does anyway).
+// before ending a router, never fewer than all of them in service, and one
+// trigger named, a change of the group's subnets (the hand-built group named
+// launch_template, which Auto Scaling does anyway; the subnet trigger came
+// with fleets in subnets of their own).
 var stepBRefresh = map[string]any{
 	"strategy": "Rolling",
 	"preferences": map[string]any{
@@ -244,6 +245,7 @@ var stepBRefresh = map[string]any{
 		"maxHealthyPercentage": float64(200),
 		"instanceWarmup":       "300",
 	},
+	"triggers": []any{"vpc_zone_identifier"},
 }
 
 // The two CloudWatch alarms of the hand-built fleet, deleted by step B.

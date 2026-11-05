@@ -10,7 +10,10 @@
           "maxHealthyPercentage": 200,
           "minHealthyPercentage": 100
         },
-        "strategy": "Rolling"
+        "strategy": "Rolling",
+        "triggers": [
+          "vpc_zone_identifier"
+        ]
       },
       "launchTemplate": {
         "id": "tailscale-lt-id",
