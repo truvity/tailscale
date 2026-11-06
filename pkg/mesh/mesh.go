@@ -163,7 +163,8 @@ type (
 
 // Validate cross-checks the tailnet's membership against the networks, and
 // enforces the placement rule: the hub is primary-tailnet-only. Refusal by
-// absence of a path, not by an ACL rule.
+// absence of a path, not by an ACL rule. When Policy.Ceiling is set it also
+// refuses a policy that renders a destination outside it.
 func (in Inputs) Validate() error {
 	nets := in.networkByName()
 
@@ -180,6 +181,20 @@ func (in Inputs) Validate() error {
 
 	if in.Hub != "" && !in.Tailnet.Primary && in.hasNetwork(in.Hub) {
 		return fmt.Errorf("tailnet %s: the hub network %q is primary-tailnet-only", in.Tailnet.Name, in.Hub)
+	}
+
+	// A policy outside its destination ceiling is refused here, before the
+	// provider or any other resource exists. Without a ceiling the policy
+	// is not even assembled, so nothing changes for an existing program.
+	if in.Policy.Ceiling != nil {
+		policy, err := in.PolicyModel()
+		if err != nil {
+			return fmt.Errorf("tailnet %s: build acl policy: %w", in.Tailnet.Name, err)
+		}
+
+		if err := policy.CheckCeiling(); err != nil {
+			return fmt.Errorf("tailnet %s: %w", in.Tailnet.Name, err)
+		}
 	}
 
 	return nil

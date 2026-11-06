@@ -100,7 +100,7 @@ func TestCeilingRefusesDestinationOutsideCIDRInBuild(t *testing.T) {
 	_, err = Build(p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "acl: rule 4 destination 10.1.0.5/32:443 is outside the tailnet ceiling")
-	assert.Contains(t, err.Error(), "nearest entry")
+	assert.Contains(t, err.Error(), "no entry covers it")
 	assert.Equal(t, err.Error(), p.CheckCeiling().Error(), "CheckCeiling reports what Build refuses")
 }
 
