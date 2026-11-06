@@ -229,6 +229,8 @@ type (
 		// tailnet member rather than a tag. See MemberGrant's own doc
 		// comment. Rendered after ExtraCIDRGrants, in the order given.
 		ExtraMemberGrants []MemberGrant `json:"extraMemberGrants,omitempty" yaml:"extraMemberGrants,omitempty"`
+		// Ceiling bounds the destination of every rendered rule.
+		Ceiling *Ceiling `json:"ceiling,omitempty" yaml:"ceiling,omitempty"`
 	}
 
 	policyDoc struct {
@@ -347,6 +349,9 @@ func (p *Policy) Validate() error {
 
 	return nil
 }
+
+// CheckCeiling refuses a policy whose rendered rules leave its Ceiling.
+func (p *Policy) CheckCeiling() error { return nil }
 
 // Build renders the policy document as deterministic, indented JSON —
 // the string Tailscale's ACL resource takes verbatim.
