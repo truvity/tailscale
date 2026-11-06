@@ -59,6 +59,7 @@ it refuses.
 | `ExtraTagOwners` | none | `map[tag][]owner`, rendered verbatim; tags without the `tag:` prefix |
 | `Networks` | none | one per network with an EC2 (or other) router |
 | `Clusters` | none | members and non-members alike |
+| `Ceiling` | none (`nil`: no bound, output unchanged) | bounds the destination of every rendered rule; see [`Ceiling`](#ceiling) |
 
 ### `Network`
 
@@ -84,9 +85,10 @@ it refuses.
 ### `Ceiling`
 
 A destination bound for one tailnet: the outer limit a rendered rule must stay
-inside. It refuses; it never adds, rewrites or clips a rule. `acl.Build` does
-not call it yet (`Policy.Ceiling` is a later release), so a consumer uses
-`Validate`, `CheckDst` and `Within` itself.
+inside. It refuses; it never adds, rewrites or clips a rule. `acl.Build` checks
+it only when `Policy.Ceiling` is set; a consumer can also call `Validate`,
+`CheckDst` and `Within` itself, to check a row before merging it or a
+requested ceiling against a registered one.
 
 | Field | Notes |
 |---|---|
@@ -110,6 +112,22 @@ Each `Destination`:
   refused. The ports are split off at the last colon, so IPv6 prefixes work.
 - `Within(outer)` refuses a ceiling that reaches beyond `outer`, naming each
   entry that does. A nil ceiling is unbounded and is within nothing.
+
+With `Policy.Ceiling` set, `Build` (and `Policy.CheckCeiling()`, which
+`mesh.Inputs.Validate` calls before the provider is registered) checks every
+destination of every rendered rule: the VPC and in-cluster tiers, the router
+tags, and all three `Extra*Grants`. A ceiling therefore has to list the
+prefixes and router tags the model itself derives, with at least the ports the
+derived rules use (`*`); it cannot be narrower than the derived tiers, because
+nothing is clipped. Every violation is reported, one line each, in rule order:
+
+```
+acl: rule 3 destination 10.99.0.0/16:* is outside the tailnet ceiling (nearest entry 10.65.0.0/16 ports *)
+```
+
+The number is the zero-based position in the rendered `acls`. A non-nil
+`Ceiling` with no `Destinations` admits nothing, so it refuses any policy that
+renders a rule.
 
 ### What it renders
 

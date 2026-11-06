@@ -51,6 +51,7 @@ package acl
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -229,6 +230,15 @@ type (
 		// tailnet member rather than a tag. See MemberGrant's own doc
 		// comment. Rendered after ExtraCIDRGrants, in the order given.
 		ExtraMemberGrants []MemberGrant `json:"extraMemberGrants,omitempty" yaml:"extraMemberGrants,omitempty"`
+		// Ceiling bounds the destination of every rule Build renders, the
+		// derived tiers, the router tags and the three Extra* grants alike:
+		// one invariant instead of a list of rows to remember. A rule whose
+		// destination falls outside it makes Build fail; nothing is
+		// rewritten or dropped. nil, the default, means no ceiling and
+		// Build's output is exactly what it was before the field existed. A
+		// non-nil Ceiling with no Destinations admits nothing, so it
+		// refuses any policy that renders a rule. See Ceiling.
+		Ceiling *Ceiling `json:"ceiling,omitempty" yaml:"ceiling,omitempty"`
 	}
 
 	policyDoc struct {
@@ -345,16 +355,73 @@ func (p *Policy) Validate() error {
 		}
 	}
 
-	return nil
+	return p.Ceiling.Validate()
+}
+
+// CheckCeiling refuses a policy whose rendered rules leave its Ceiling. It
+// validates the policy first, assembles the rules exactly as Build does and
+// reports every rule destination outside the ceiling, one line each, in rule
+// order: "acl: rule 3 destination 10.99.0.0/16:* is outside the tailnet
+// ceiling (nearest entry 10.65.0.0/16 ports *)", where the rule number is the
+// zero-based position in the rendered acls. A policy without a Ceiling is
+// always accepted. mesh.Inputs.Validate calls it, so a violation fails before
+// any resource is registered.
+func (p *Policy) CheckCeiling() error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+
+	return p.document().checkCeiling(p.Ceiling)
+}
+
+// checkCeiling refuses every acls destination outside c; a nil c checks nothing.
+func (d policyDoc) checkCeiling(c *Ceiling) error {
+	if c == nil {
+		return nil
+	}
+
+	entries, err := c.compile()
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+
+	for i, r := range d.ACLs {
+		for _, dst := range r.Dst {
+			if v := violation(entries, dst); v != "" {
+				errs = append(errs, fmt.Errorf("acl: rule %d destination %s", i, v))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // Build renders the policy document as deterministic, indented JSON —
-// the string Tailscale's ACL resource takes verbatim.
+// the string Tailscale's ACL resource takes verbatim. With a Ceiling set, a
+// rule destination outside it is an error naming every such destination.
 func Build(p Policy) (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
 
+	doc := p.document()
+
+	if err := doc.checkCeiling(p.Ceiling); err != nil {
+		return "", err
+	}
+
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal acl policy: %w", err)
+	}
+
+	return string(data), nil
+}
+
+// document assembles the policy document of a validated policy.
+func (p *Policy) document() policyDoc {
 	manager := p.ManagerTag
 	if manager == "" {
 		manager = DefaultManagerTag
@@ -376,18 +443,11 @@ func Build(p Policy) (string, error) {
 	acls = append(acls, cidrGrantRules(p.ExtraCIDRGrants)...)
 	acls = append(acls, memberGrantRules(p.ExtraMemberGrants)...)
 
-	doc := policyDoc{
+	return policyDoc{
 		TagOwners:     tagOwners(manager, p.ExtraTagOwners, networks, clusters),
 		ACLs:          acls,
 		AutoApprovers: approvers(networks, clusters, netByName),
 	}
-
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal acl policy: %w", err)
-	}
-
-	return string(data), nil
 }
 
 func tagOwners(manager string, extra map[string][]string, networks []Network, clusters []Cluster) map[string][]string {
