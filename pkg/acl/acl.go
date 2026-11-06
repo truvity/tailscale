@@ -237,7 +237,8 @@ type (
 		// rewritten or dropped. nil, the default, means no ceiling and
 		// Build's output is exactly what it was before the field existed. A
 		// non-nil Ceiling with no Destinations admits nothing, so it
-		// refuses any policy that renders a rule. See Ceiling.
+		// refuses any policy that renders a rule. Ceiling.Routes, when
+		// set, bounds the auto-approved routes the same way. See Ceiling.
 		Ceiling *Ceiling `json:"ceiling,omitempty" yaml:"ceiling,omitempty"`
 	}
 
@@ -391,6 +392,23 @@ func (d policyDoc) checkCeiling(c *Ceiling) error {
 		for _, dst := range r.Dst {
 			if v := violation(entries, dst); v != "" {
 				errs = append(errs, fmt.Errorf("acl: rule %d destination %s", i, v))
+			}
+		}
+	}
+
+	// Auto-approved routes, when the ceiling bounds them; sorted, so the
+	// report is the same on every run.
+	if len(c.Routes) > 0 {
+		routes := make([]string, 0, len(d.AutoApprovers.Routes))
+		for route := range d.AutoApprovers.Routes {
+			routes = append(routes, route)
+		}
+
+		sort.Strings(routes)
+
+		for _, route := range routes {
+			if v := routeViolation(c.Routes, route); v != "" {
+				errs = append(errs, fmt.Errorf("acl: autoApprovers.routes %s", v))
 			}
 		}
 	}
