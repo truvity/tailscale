@@ -69,5 +69,8 @@ tags.
   upgrade unless the release says otherwise; the router's default user data
   is pinned by a golden file for exactly this reason (see
   [adoption.md](adoption.md)).
+- **A bound refuses, it never rewrites.** `acl.Policy.Ceiling` fails `Build`
+  when a rule leaves it, naming every such rule; it never drops, narrows or
+  adds one, and `mesh` checks it before the provider is registered.
 - **Every refusal has a fixture or a test.** A chart rule comes with its file
   in `tests/invalid/<chart>/`; a Go refusal comes with its test case.

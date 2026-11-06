@@ -50,6 +50,10 @@ runs, or differs by exactly the change the release announces in
   and adopt the release on the difference between the two
   ([safety.md](safety.md#the-image-follows-the-newest-match)).
 
+`acl.Policy.Ceiling` is nil unless you set it, and a nil ceiling leaves the
+rendered policy byte-identical: bumping the module is a zero-diff change, and
+setting a ceiling renders the same document or refuses to render.
+
 Tightening a default is a separate change, adopted on its own evidence.
 
 ## Adopting what already exists
@@ -88,6 +92,7 @@ render or a preview:
 
 | Version | What you will see |
 |---|---|
+| Unreleased | `pkg/acl`: optional `Policy.Ceiling`, unset by default. Unset, `Build` and the Pulumi preview are byte-identical to the previous release. Set, a rule destination outside the ceiling makes `Build` (and `mesh.Inputs.Validate`, before the provider is registered) fail; a policy inside it renders the same document as without it |
 | v1.18.0 | `pkg/awsrouter`: the image lookup returns only Amazon's standard AL2023 arm64 image, on one kernel line — never a minimal or ECS image. A new input, `Image` (`ImageConfig{Kernel}`), defaults to kernel 6.18. A fleet that rolled onto a minimal image sees the launch template's image move to the standard one (same kernel line at 6.18), and the instance refresh replaces every router. The user data is unchanged apart from the `router-setup.sh` pin when you bump `RouterSetupVersion` |
 | v1.17.0 | `pkg/awsrouter`: the launch template gains a root block device mapping (the image's root device, 8 GiB `gp3`, encrypted, deleted on termination) — a new input, `RootVolume`, defaults to it. The user data drops cloud-init's `swap:` block; `router-setup.sh` creates the swap file only when the disk has room, caps journald at 200 MB and makes the join single-flight. No input is required. Bumping `RouterSetupVersion` is a new launch-template version and a refresh of every router |
 | v1.16.0 | `pkg/awsrouter`: the SSH lockdown (`AuthorizedKeysFile none`, no password or keyboard-interactive login, `LogLevel VERBOSE`, `ssh` off the `public` firewalld zone) moves out of `10-user-ca.conf` into its own `10-ssh-login.conf`, written whenever `TrustedUserCAKeys` **or** `OPKSSH` is set. No input changes. A router with certificate login ends up in the same effective sshd configuration, split over two files; an opkssh-only router gains the lockdown it lacked; a router with neither is unchanged. Every router's user data pins the new `router-setup.sh`, so bumping `RouterSetupVersion` is a new launch-template version and a refresh |

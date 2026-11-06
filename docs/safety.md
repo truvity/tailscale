@@ -63,6 +63,14 @@ without creating a resource:
 two networks or two clusters with one name; a cluster without a name; a
 member cluster naming a network that does not exist.
 
+With `Policy.Ceiling` set, `Build` also refuses every rendered rule whose
+destination is outside it, and reports all of them at once, in rule order. The
+ceiling bounds the derived tiers and router tags as well as the three
+`Extra*Grants`, so one invariant covers every row. `mesh.Inputs.Validate`
+runs the same check before the Tailscale provider is registered, so a
+violation stops the program before any resource exists. A policy without a
+ceiling is not affected.
+
 `Ceiling.Validate` refuses an entry with both or neither of `CIDR` and `Tag`;
 a `CIDR` that does not parse, is an IPv4-mapped IPv6 prefix, or has host bits
 set; a `Tag` carrying the `tag:` prefix, a colon, a comma, a slash or

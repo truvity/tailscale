@@ -112,16 +112,26 @@ func (c *Ceiling) CheckDst(dst string) error {
 		return err
 	}
 
-	t, err := parseTarget(dst)
-	if err != nil {
-		return fmt.Errorf("acl: destination %q cannot be checked against the tailnet ceiling: %w", dst, err)
-	}
-
-	if why := admit(entries, t); why != "" {
-		return fmt.Errorf("acl: destination %s is outside the tailnet ceiling (%s)", dst, why)
+	if v := violation(entries, dst); v != "" {
+		return fmt.Errorf("acl: destination %s", v)
 	}
 
 	return nil
+}
+
+// violation returns "" when the entries admit dst, otherwise the text that
+// follows "destination " in a refusal.
+func violation(entries []entry, dst string) string {
+	t, err := parseTarget(dst)
+	if err != nil {
+		return fmt.Sprintf("%q cannot be checked against the tailnet ceiling: %v", dst, err)
+	}
+
+	if why := admit(entries, t); why != "" {
+		return fmt.Sprintf("%s is outside the tailnet ceiling (%s)", dst, why)
+	}
+
+	return ""
 }
 
 // Within refuses a ceiling that reaches beyond outer: an entry of c that the

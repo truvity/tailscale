@@ -1,0 +1,145 @@
+{
+  "tagOwners": {
+    "tag:devel-router": [
+      "tag:infra-manager"
+    ],
+    "tag:infra-manager": [
+      "autogroup:admin"
+    ],
+    "tag:k8s-devel-router": [
+      "tag:infra-manager"
+    ],
+    "tag:k8s-operator": [
+      "autogroup:admin"
+    ],
+    "tag:k8s-prod-router": [
+      "tag:infra-manager"
+    ],
+    "tag:prod-router": [
+      "tag:infra-manager"
+    ]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": [
+        "group:eng@example.com",
+        "group:qa@example.com"
+      ],
+      "dst": [
+        "10.1.0.0/16:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "group:eng@example.com"
+      ],
+      "dst": [
+        "172.1.0.0/16:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "group:eng@example.com"
+      ],
+      "dst": [
+        "10.2.0.0/16:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "group:ops@example.com"
+      ],
+      "dst": [
+        "172.2.0.0/16:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "group:eng@example.com",
+        "group:partner@example.com",
+        "group:qa@example.com"
+      ],
+      "dst": [
+        "tag:devel-router:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "group:eng@example.com"
+      ],
+      "dst": [
+        "tag:prod-router:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "group:eng@example.com",
+        "group:qa@example.com"
+      ],
+      "dst": [
+        "tag:k8s-devel-router:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "group:eng@example.com"
+      ],
+      "dst": [
+        "tag:k8s-prod-router:*"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "tag:a"
+      ],
+      "dst": [
+        "tag:b:9092"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "tag:a"
+      ],
+      "dst": [
+        "10.1.0.20/32:443,8443"
+      ]
+    },
+    {
+      "action": "accept",
+      "src": [
+        "autogroup:member"
+      ],
+      "dst": [
+        "tag:b:80"
+      ]
+    }
+  ],
+  "autoApprovers": {
+    "routes": {
+      "10.1.0.0/16": [
+        "tag:devel-router",
+        "tag:k8s-devel-router"
+      ],
+      "10.2.0.0/16": [
+        "tag:prod-router",
+        "tag:k8s-prod-router"
+      ],
+      "172.1.0.0/16": [
+        "tag:k8s-devel-router"
+      ],
+      "172.2.0.0/16": [
+        "tag:k8s-prod-router"
+      ]
+    }
+  }
+}

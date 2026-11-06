@@ -264,19 +264,74 @@ func TestDeployWithoutFlowLogsOrOnACompanyTailnet(t *testing.T) {
 	assert.Equal(t, []string{"auth-key-dev-2026-10", "k8s-auth-key-dev-2026-10"}, m.names("tailscale:index/tailnetKey:TailnetKey"))
 }
 
+// wideCeiling admits everything exampleInputs renders: every network and
+// cluster CIDR, and every router tag.
+func wideCeiling() *acl.Ceiling {
+	d := []acl.Destination{{CIDR: "10.0.0.0/8", Ports: []string{"*"}}, {CIDR: "172.16.0.0/12", Ports: []string{"*"}}}
+	for _, tag := range []string{"hub-router", "dev-router", "lab-router", "k8s-hub-router", "k8s-dev-router", "k8s-lab-router"} {
+		d = append(d, acl.Destination{Tag: tag, Ports: []string{"*"}})
+	}
+
+	return &acl.Ceiling{Destinations: d}
+}
+
+func TestValidateAdmitsAPolicyInsideTheCeiling(t *testing.T) {
+	in := exampleInputs()
+	in.Policy.Ceiling = wideCeiling()
+
+	require.NoError(t, in.Validate())
+}
+
+func TestValidateRefusesACeilingViolation(t *testing.T) {
+	in := exampleInputs()
+	in.Policy.Ceiling = &acl.Ceiling{Destinations: []acl.Destination{{CIDR: "10.64.0.0/16", Ports: []string{"*"}}}}
+
+	err := in.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is outside the tailnet ceiling")
+	assert.Contains(t, err.Error(), "10.65.0.0/16:*", "the dev network's tier is outside a ceiling of the hub network alone")
+}
+
+func TestMeshValidateRefusesCeilingViolationBeforeProvider(t *testing.T) {
+	in := exampleInputs()
+	in.OAuth = func(*pulumi.Context) (string, string, error) { return "client-id", "client-secret", nil }
+	in.Policy.Ceiling = &acl.Ceiling{Destinations: []acl.Destination{{CIDR: "10.64.0.0/16", Ports: []string{"*"}}}}
+
+	m, err := runDeployErr(in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is outside the tailnet ceiling")
+
+	for _, r := range m.resources {
+		assert.Equal(t, "pulumi:pulumi:Stack", r.typ, "a refused ceiling registers nothing: %s %s", r.typ, r.name)
+	}
+
+	// Inside the ceiling, the same inputs deploy.
+	in.Policy.Ceiling = wideCeiling()
+	m = runDeploy(t, in)
+	assert.Equal(t, []string{"acl"}, m.names("tailscale:index/acl:Acl"))
+}
+
 func runDeploy(t *testing.T, in Inputs) *mocks {
 	t.Helper()
 
+	m, err := runDeployErr(in)
+	require.NoError(t, err)
+
+	return m
+}
+
+// runDeployErr deploys under the mocks and returns what Deploy returned.
+func runDeployErr(in Inputs) (*mocks, error) {
 	m := &mocks{}
 	in.Logger = slog.New(slog.DiscardHandler)
 	in.AWSProvider = func(ctx *pulumi.Context, network string) (*aws.Provider, error) {
 		return aws.NewProvider(ctx, "aws-"+network, &aws.ProviderArgs{Region: pulumi.String("eu-example-1")})
 	}
 
-	require.NoError(t, pulumi.RunErr(func(ctx *pulumi.Context) error { return Deploy(ctx, in) },
-		pulumi.WithMocks("example", "tailscale", m)))
+	err := pulumi.RunErr(func(ctx *pulumi.Context) error { return Deploy(ctx, in) },
+		pulumi.WithMocks("example", "tailscale", m))
 
-	return m
+	return m, err
 }
 
 type (
