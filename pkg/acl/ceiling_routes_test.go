@@ -1,6 +1,7 @@
 package acl
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -89,7 +90,15 @@ func TestCeilingReportsRuleViolationsBeforeRouteViolationsInOrder(t *testing.T) 
 	require.Error(t, err)
 
 	want := err.Error()
-	assert.Regexp(t, `(?s)rule 0 destination 198\.51\.100\.0/24:\*.*rule 0 destination 192\.0\.2\.0/24:\*.*rule 1 destination 172\.16\.0\.0/16:\*.*autoApprovers\.routes 172\.16\.0\.0/16.*autoApprovers\.routes 192\.0\.2\.0/24.*autoApprovers\.routes 198\.51\.100\.0/24`, want)
+	// Rule violations come first, in rule order; route violations follow, sorted.
+	assert.Regexp(t, strings.Join([]string{
+		`rule 0 destination 198\.51\.100\.0/24:\*`,
+		`rule 0 destination 192\.0\.2\.0/24:\*`,
+		`rule 1 destination 172\.16\.0\.0/16:\*`,
+		`autoApprovers\.routes 172\.16\.0\.0/16`,
+		`autoApprovers\.routes 192\.0\.2\.0/24`,
+		`autoApprovers\.routes 198\.51\.100\.0/24`,
+	}, `(?s).*`), want)
 
 	_, again := Build(p)
 	assert.Equal(t, want, again.Error())
@@ -146,4 +155,10 @@ func TestCeilingWithinBoundsRoutes(t *testing.T) {
 	// A registered ceiling without Routes bounds none, so any Routes are within it.
 	require.NoError(t, (&Ceiling{Routes: []string{"10.1.0.0/16"}}).Within(&Ceiling{}))
 	require.NoError(t, (&Ceiling{}).Within(&Ceiling{}))
+}
+
+func TestCeilingWithinNamesTheWideningRoute(t *testing.T) {
+	err := (&Ceiling{Routes: []string{"10.1.0.0/16"}}).Within(&Ceiling{Routes: []string{"10.0.0.0/16"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ceiling route 10.1.0.0/16 is outside the tailnet ceiling routes")
 }

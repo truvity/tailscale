@@ -34,7 +34,12 @@ type (
 		// Destinations are the entries a rendered destination must fall
 		// inside. Empty admits nothing.
 		Destinations []Destination `json:"destinations,omitempty" yaml:"destinations,omitempty"`
-		// Routes bounds the routes the policy auto-approves.
+		// Routes bounds the routes the policy auto-approves
+		// (autoApprovers.routes): when non-empty, each approved route must
+		// lie inside one of these canonical prefixes, so the default route
+		// 0.0.0.0/0 is refused unless it is listed. Empty, the default,
+		// leaves routes unchecked. A route is not a destination: Routes
+		// neither widens nor narrows Destinations.
 		Routes []string `json:"routes,omitempty" yaml:"routes,omitempty"`
 	}
 
@@ -91,6 +96,62 @@ func (c *Ceiling) Validate() error {
 	_, err := c.compile()
 
 	return err
+}
+
+// CheckRoute refuses a route (a canonical prefix, "10.0.0.0/24") that is not
+// inside one of the ceiling's Routes. With no Routes, routes are not bounded
+// and every route is accepted; a nil receiver fails closed. Anything that is
+// not a canonical prefix is refused once Routes is set.
+func (c *Ceiling) CheckRoute(route string) error {
+	if c == nil {
+		return fmt.Errorf("acl: route %s: there is no ceiling to check it against", route)
+	}
+
+	if _, err := c.compile(); err != nil {
+		return err
+	}
+
+	if why := routeViolation(c.Routes, route); why != "" {
+		return fmt.Errorf("acl: route %s", why)
+	}
+
+	return nil
+}
+
+// routeViolation returns "" when route is inside one of routes (or routes is
+// empty), otherwise the text that follows "route " in a refusal.
+func routeViolation(routes []string, route string) string {
+	if len(routes) == 0 {
+		return ""
+	}
+
+	p, err := parsePrefix(route)
+	if err != nil {
+		return fmt.Sprintf("%q cannot be checked against the tailnet ceiling: %v", route, err)
+	}
+
+	var nearest netip.Prefix
+
+	for _, r := range routes {
+		outer, err := netip.ParsePrefix(r)
+		if err != nil {
+			continue
+		}
+
+		if outer.Bits() <= p.Bits() && outer.Contains(p.Addr()) {
+			return ""
+		}
+
+		if !nearest.IsValid() && outer.Overlaps(p) {
+			nearest = outer
+		}
+	}
+
+	if nearest.IsValid() {
+		return fmt.Sprintf("%s is outside the tailnet ceiling routes (nearest entry %s)", route, nearest)
+	}
+
+	return fmt.Sprintf("%s is outside the tailnet ceiling routes (no entry covers it)", route)
 }
 
 // CheckDst refuses a rendered destination that is outside the ceiling. dst
@@ -163,6 +224,18 @@ func (c *Ceiling) Within(outer *Ceiling) error {
 
 	var errs []error
 
+	// A registered ceiling with Routes bounds them: a requested one with
+	// none is unbounded, and each of its routes must be inside.
+	if len(outer.Routes) > 0 && len(c.Routes) == 0 {
+		errs = append(errs, errors.New("acl: ceiling has no routes, which leaves routes unbounded, but the outer ceiling bounds them"))
+	}
+
+	for _, r := range c.Routes {
+		if why := routeViolation(outer.Routes, r); why != "" {
+			errs = append(errs, fmt.Errorf("acl: ceiling route %s", why))
+		}
+	}
+
 	for _, e := range own {
 		t := target{prefix: e.prefix, tag: e.tag, ports: e.ports, text: e.text}
 		if why := admit(bound, t); why != "" {
@@ -175,6 +248,10 @@ func (c *Ceiling) Within(outer *Ceiling) error {
 
 // compile validates the ceiling and returns its entries in the order written.
 func (c *Ceiling) compile() ([]entry, error) {
+	if err := c.checkRoutes(); err != nil {
+		return nil, err
+	}
+
 	out := make([]entry, 0, len(c.Destinations))
 	seen := map[string]bool{}
 
@@ -194,6 +271,25 @@ func (c *Ceiling) compile() ([]entry, error) {
 	}
 
 	return out, nil
+}
+
+// checkRoutes refuses a Routes entry that is not a canonical prefix, or is listed twice.
+func (c *Ceiling) checkRoutes() error {
+	seen := map[string]bool{}
+
+	for i, r := range c.Routes {
+		if _, err := parsePrefix(r); err != nil {
+			return fmt.Errorf("acl: ceiling route %d: %w", i, err)
+		}
+
+		if seen[r] {
+			return fmt.Errorf("acl: ceiling route %d: %s is listed twice", i, r)
+		}
+
+		seen[r] = true
+	}
+
+	return nil
 }
 
 func compileDestination(d Destination) (entry, error) {
@@ -464,6 +560,3 @@ func admit(entries []entry, t target) string {
 
 	return fmt.Sprintf("nearest entry %s ports %s", holder.text, holder.spec)
 }
-
-// CheckRoute refuses a route outside the ceiling's Routes.
-func (c *Ceiling) CheckRoute(route string) error { return nil }

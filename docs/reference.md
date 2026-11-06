@@ -93,6 +93,7 @@ requested ceiling against a registered one.
 | Field | Notes |
 |---|---|
 | `Destinations` | the entries a destination must fall inside. Empty admits nothing |
+| `Routes` | optional canonical prefixes bounding `autoApprovers.routes`. Empty leaves routes unchecked |
 
 Each `Destination`:
 
@@ -111,7 +112,11 @@ Each `Destination`:
   `group:x:*`, a host name, a bare address, a prefix with host bits set) is
   refused. The ports are split off at the last colon, so IPv6 prefixes work.
 - `Within(outer)` refuses a ceiling that reaches beyond `outer`, naming each
-  entry that does. A nil ceiling is unbounded and is within nothing.
+  entry that does. A nil ceiling is unbounded and is within nothing. When
+  `outer` has `Routes`, so must the ceiling, and each route must lie inside one
+  of them; when `outer` has none, routes are not compared.
+- `CheckRoute(route)` refuses a route outside `Routes`. With no `Routes` every
+  route is accepted.
 
 With `Policy.Ceiling` set, `Build` (and `Policy.CheckCeiling()`, which
 `mesh.Inputs.Validate` calls before the provider is registered) checks every
@@ -124,6 +129,18 @@ nothing is clipped. Every violation is reported, one line each, in rule order:
 ```
 acl: rule 3 destination 10.99.0.0/16:* is outside the tailnet ceiling (nearest entry 10.65.0.0/16 ports *)
 ```
+
+With `Routes` set, every key of the rendered `autoApprovers.routes` must also
+lie inside one of the listed prefixes, so the default route `0.0.0.0/0` is
+refused unless it is listed. Route violations follow the rule violations, in
+sorted order:
+
+```
+acl: autoApprovers.routes 10.99.0.0/16 is outside the tailnet ceiling routes (no entry covers it)
+```
+
+`Routes` bounds the auto-approved routes only; it neither widens nor narrows
+`Destinations`, and an empty `Routes` bounds nothing.
 
 The number is the zero-based position in the rendered `acls`. A non-nil
 `Ceiling` with no `Destinations` admits nothing, so it refuses any policy that
