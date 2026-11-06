@@ -81,6 +81,36 @@ it refuses.
 | `VPCGroups` | directory group emails that reach the network's VPC CIDR and the routers on it |
 | `InClusterGroups` | directory group emails that reach the Service CIDR |
 
+### `Ceiling`
+
+A destination bound for one tailnet: the outer limit a rendered rule must stay
+inside. It refuses; it never adds, rewrites or clips a rule. `acl.Build` does
+not call it yet (`Policy.Ceiling` is a later release), so a consumer uses
+`Validate`, `CheckDst` and `Within` itself.
+
+| Field | Notes |
+|---|---|
+| `Destinations` | the entries a destination must fall inside. Empty admits nothing |
+
+Each `Destination`:
+
+| Field | Notes |
+|---|---|
+| `CIDR` | a canonical prefix (`10.0.0.0/16`; a host is a `/32` or `/128`). Exactly one of `CIDR` or `Tag` |
+| `Tag` | a tag name without the `tag:` prefix |
+| `Ports` | required: `*`, `443` or `8000-8100`, each within 1-65535 |
+
+- `Validate()` refuses a malformed ceiling (see [safety.md](safety.md#pkgacl)).
+- `CheckDst(dst)` takes a rendered destination, `10.0.0.5/32:443,8443` or
+  `tag:x:22`, and refuses it unless it is inside the ceiling. A prefix is
+  admitted by the entries whose prefix contains it, with the ports of those
+  entries pooled; it is not admitted by two entries that are its halves. A tag
+  is admitted by an entry that names it. Anything else (`autogroup:internet:*`,
+  `group:x:*`, a host name, a bare address, a prefix with host bits set) is
+  refused. The ports are split off at the last colon, so IPv6 prefixes work.
+- `Within(outer)` refuses a ceiling that reaches beyond `outer`, naming each
+  entry that does. A nil ceiling is unbounded and is within nothing.
+
 ### What it renders
 
 For the model in the [README](../README.md#install-and-a-worked-example):

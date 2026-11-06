@@ -63,6 +63,16 @@ without creating a resource:
 two networks or two clusters with one name; a cluster without a name; a
 member cluster naming a network that does not exist.
 
+`Ceiling.Validate` refuses an entry with both or neither of `CIDR` and `Tag`;
+a `CIDR` that does not parse, is an IPv4-mapped IPv6 prefix, or has host bits
+set; a `Tag` carrying the `tag:` prefix, a colon, a comma, a slash or
+whitespace; an empty port list; a port that is not decimal digits, is 0 or is
+above 65535; a reversed range; a port listed twice in one entry; and a prefix
+or tag listed twice. `Ceiling.CheckDst` refuses every destination it cannot
+read as a canonical prefix or a tag with a valid port list, so a ceiling never
+waves through a shape it does not understand. `Ceiling.Within` refuses a
+ceiling that is wider than another in a prefix, a port or a tag.
+
 ### pkg/tailnet
 
 `NewRouterKey` refuses a key without a tag: ownership, access and route
