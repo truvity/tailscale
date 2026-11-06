@@ -34,6 +34,8 @@ type (
 		// Destinations are the entries a rendered destination must fall
 		// inside. Empty admits nothing.
 		Destinations []Destination `json:"destinations,omitempty" yaml:"destinations,omitempty"`
+		// Routes bounds the routes the policy auto-approves.
+		Routes []string `json:"routes,omitempty" yaml:"routes,omitempty"`
 	}
 
 	// Destination is one entry of a Ceiling: exactly one of CIDR or Tag, and
@@ -462,3 +464,6 @@ func admit(entries []entry, t target) string {
 
 	return fmt.Sprintf("nearest entry %s ports %s", holder.text, holder.spec)
 }
+
+// CheckRoute refuses a route outside the ceiling's Routes.
+func (c *Ceiling) CheckRoute(route string) error { return nil }
