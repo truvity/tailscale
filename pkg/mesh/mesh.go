@@ -1,6 +1,6 @@
 // Package mesh is the stack of one tailnet: its ACL policy, its router auth
-// keys, its split DNS, and (on the account's primary tailnet, plan
-// permitting) its flow logs, from one plain Inputs value.
+// keys, its split DNS, and (where the tailnet's plan and its configuration
+// allow) its flow logs, from one plain Inputs value.
 //
 // Where pkg/acl derives a policy document from a model and pkg/tailnet wraps
 // the individual provider resources, this package is what stands between an
@@ -52,8 +52,9 @@ type (
 		// resolve: only its own domain's groups exist in the tailnet, so a
 		// rule naming any other would reference a group it never learns.
 		Domain string
-		// Primary marks the account's primary tailnet: the only one that
-		// carries flow logs, and the only one the hub network may join.
+		// Primary marks the account's primary tailnet: the only one the hub
+		// network may join. Flow logs do not depend on it: any tailnet whose
+		// Inputs.FlowLogs is enabled carries them.
 		Primary bool
 		// Networks are the physical networks (Network.Name) whose routers
 		// join this tailnet.
@@ -164,8 +165,9 @@ type (
 		// Network.Name) lives in.
 		AWSProvider func(ctx *pulumi.Context, network string) (*aws.Provider, error)
 
-		// FlowLogs is the flow-log configuration (primary tailnet only),
-		// and Region the S3 bucket's region.
+		// FlowLogs is the flow-log configuration of this tailnet (any
+		// tailnet, primary or not; the zero value deploys none), and Region
+		// the S3 bucket's region.
 		FlowLogs FlowLogConfig
 		Region   string
 
@@ -200,6 +202,10 @@ func (in Inputs) Validate() error {
 
 	if in.Hub != "" && !in.Tailnet.Primary && in.hasNetwork(in.Hub) {
 		return fmt.Errorf("tailnet %s: the hub network %q is primary-tailnet-only", in.Tailnet.Name, in.Hub)
+	}
+
+	if err := in.checkFlowLogs(); err != nil {
+		return err
 	}
 
 	// A route list that widens its network is refused here too, before the
@@ -291,7 +297,7 @@ func (in Inputs) CheckAdvertised(network string, advertised []string) error {
 }
 
 // Deploy registers the tailnet's stack: provider, ACL, auth keys, k8s router
-// keys, split DNS, k8s split DNS and, on the primary tailnet, flow logs.
+// keys, split DNS, k8s split DNS and, when FlowLogs is enabled, flow logs.
 func Deploy(ctx *pulumi.Context, in Inputs) error {
 	logger := in.Logger
 	if logger == nil {
@@ -341,12 +347,10 @@ func Deploy(ctx *pulumi.Context, in Inputs) error {
 		return fmt.Errorf("deploy k8s router split dns: %w", err)
 	}
 
-	// Flow logs are a plan feature of the primary account only; a company
-	// tailnet decides (and pays for) its own.
-	if in.Tailnet.Primary {
-		if err := in.deployFlowLogs(ctx, logger, provider); err != nil {
-			return fmt.Errorf("deploy flow logs: %w", err)
-		}
+	// Flow logs are a plan feature of the tailnet's account, so each tailnet
+	// opts in through its own FlowLogs; unset deploys none.
+	if err := in.deployFlowLogs(ctx, logger, provider); err != nil {
+		return fmt.Errorf("deploy flow logs: %w", err)
 	}
 
 	routers := 0
@@ -361,7 +365,7 @@ func Deploy(ctx *pulumi.Context, in Inputs) error {
 		slog.String("tailnet", in.Tailnet.Name),
 		slog.String("domain", in.Tailnet.Domain),
 		slog.Int("router_environments", routers),
-		slog.Bool("flow_logs", in.Tailnet.Primary && in.FlowLogs.Enabled),
+		slog.Bool("flow_logs", in.FlowLogs.Enabled),
 	)
 
 	return nil

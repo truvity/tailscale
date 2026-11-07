@@ -87,6 +87,18 @@ read as a canonical prefix or a tag with a valid port list, so a ceiling never
 waves through a shape it does not understand. `Ceiling.Within` refuses a
 ceiling that is wider than another in a prefix, a port or a tag.
 
+### pkg/mesh flow logs
+
+Any tailnet in a program can stream its network flow logs; the primary tailnet
+is no longer the only one. `mesh.Inputs.Validate` refuses, naming the tailnet
+and before any resource is registered, a bucket without a role ARN or the
+reverse (whether or not the stream is enabled, so a half-set pair is never
+read as configured and then skipped), an enabled stream with neither, and an
+enabled stream with no region. With all flow-log fields unset nothing is
+deployed, as before. The stream needs a Tailscale plan that offers it on that
+tailnet's own account, and the role's trust policy has to match what
+Tailscale requires; neither is checked here.
+
 ### pkg/tailnet
 
 `NewRouterKey` refuses a key without a tag: ownership, access and route

@@ -246,22 +246,111 @@ func TestDeployRegistersTheNamedResources(t *testing.T) {
 	assert.Equal(t, []string{"flow-logs"}, m.names("tailscale:index/logstreamConfiguration:LogstreamConfiguration"))
 }
 
-func TestDeployWithoutFlowLogsOrOnACompanyTailnet(t *testing.T) {
+const logstreamType = "tailscale:index/logstreamConfiguration:LogstreamConfiguration"
+
+func flowLogOAuth(*pulumi.Context) (string, string, error) { return "id", "secret", nil }
+
+func TestDeployWithoutFlowLogsDeploysNoStream(t *testing.T) {
+	for _, primary := range []bool{true, false} {
+		in := exampleInputs()
+		in.Tailnet.Primary = primary
+		in.Tailnet.Networks = []string{"dev"}
+		in.OAuth = flowLogOAuth
+
+		m := runDeploy(t, in)
+		assert.Empty(t, m.names(logstreamType), "primary=%v, flow logs unset", primary)
+	}
+
+	// Configured but not enabled is an explicit off.
 	in := exampleInputs()
-	in.OAuth = func(*pulumi.Context) (string, string, error) { return "id", "secret", nil }
-
-	m := runDeploy(t, in)
-	assert.Empty(t, m.names("tailscale:index/logstreamConfiguration:LogstreamConfiguration"), "disabled")
-
-	in = exampleInputs()
 	in.Tailnet.Primary = false
 	in.Tailnet.Networks = []string{"dev"}
-	in.FlowLogs = FlowLogConfig{Enabled: true, Bucket: "b", RoleArn: "r"}
-	in.OAuth = func(*pulumi.Context) (string, string, error) { return "id", "secret", nil }
+	in.FlowLogs = FlowLogConfig{Bucket: "b", RoleArn: "r"}
+	in.OAuth = flowLogOAuth
 
-	m = runDeploy(t, in)
-	assert.Empty(t, m.names("tailscale:index/logstreamConfiguration:LogstreamConfiguration"), "a company tailnet decides for itself")
-	assert.Equal(t, []string{"auth-key-dev-2026-10", "k8s-auth-key-dev-2026-10"}, m.names("tailscale:index/tailnetKey:TailnetKey"))
+	assert.Empty(t, runDeploy(t, in).names(logstreamType))
+}
+
+func TestDeployRegistersTheStreamOnANonPrimaryTailnet(t *testing.T) {
+	in := exampleInputs()
+	in.Tailnet.Primary = false
+	in.Tailnet.Networks = []string{"dev"}
+	in.FlowLogs = FlowLogConfig{Enabled: true, Bucket: "example-logs", RoleArn: "arn:aws:iam::example:role/flow"}
+	in.Region = "eu-example-1"
+	in.OAuth = flowLogOAuth
+
+	m := runDeploy(t, in)
+
+	assert.Equal(t, []string{"flow-logs"}, m.names(logstreamType))
+	assert.Equal(t, "example-logs", m.input(logstreamType, "flow-logs", "s3Bucket"))
+	assert.Equal(t, "eu-example-1", m.input(logstreamType, "flow-logs", "s3Region"))
+	assert.Equal(t, "arn:aws:iam::example:role/flow", m.input(logstreamType, "flow-logs", "s3RoleArn"))
+	assert.Equal(t, []string{"auth-key-dev-2026-10", "k8s-auth-key-dev-2026-10"}, m.names("tailscale:index/tailnetKey:TailnetKey"),
+		"the rest of the program is as without flow logs")
+}
+
+func TestDeployRegistersTheSameStreamOnPrimaryAndNonPrimary(t *testing.T) {
+	deploy := func(primary bool) *mocks {
+		in := exampleInputs()
+		in.Tailnet.Primary = primary
+		in.Tailnet.Networks = []string{"dev"}
+		in.FlowLogs = FlowLogConfig{Enabled: true, Bucket: "b", RoleArn: "r"}
+		in.Region = "eu-example-1"
+		in.OAuth = flowLogOAuth
+
+		return runDeploy(t, in)
+	}
+
+	for _, field := range []string{"logType", "destinationType", "s3AuthenticationType", "s3Bucket", "s3Region", "s3RoleArn"} {
+		assert.Equal(t, deploy(true).input(logstreamType, "flow-logs", field), deploy(false).input(logstreamType, "flow-logs", field), field)
+	}
+}
+
+func TestValidateRefusesAHalfSetFlowLogConfigNamingTheTailnet(t *testing.T) {
+	cases := map[string]struct {
+		cfg    FlowLogConfig
+		region string
+		want   string
+	}{
+		"bucket without role":              {FlowLogConfig{Enabled: true, Bucket: "b"}, "r1", "name bucket \"b\" but no role ARN"},
+		"role without bucket":              {FlowLogConfig{Enabled: true, RoleArn: "r"}, "r1", "name a role ARN but no bucket"},
+		"bucket without role, not enabled": {FlowLogConfig{Bucket: "b"}, "r1", "name bucket \"b\" but no role ARN"},
+		"role without bucket, not enabled": {FlowLogConfig{RoleArn: "r"}, "r1", "name a role ARN but no bucket"},
+		"enabled with neither":             {FlowLogConfig{Enabled: true}, "r1", "enabled but name no bucket and no role ARN"},
+		"enabled without a region":         {FlowLogConfig{Enabled: true, Bucket: "b", RoleArn: "r"}, "", "region is empty"},
+	}
+
+	for name, tc := range cases {
+		for _, primary := range []bool{true, false} {
+			in := exampleInputs()
+			in.Tailnet.Primary = primary
+			in.Tailnet.Networks = []string{"dev"}
+			in.FlowLogs = tc.cfg
+			in.Region = tc.region
+			in.OAuth = flowLogOAuth
+
+			err := in.Validate()
+			require.ErrorContains(t, err, "tailnet acme: flow logs", "%s, primary=%v", name, primary)
+			require.ErrorContains(t, err, tc.want, "%s, primary=%v", name, primary)
+
+			// Deploy refuses it too, before any resource is registered.
+			m, derr := runDeployErr(in)
+			require.ErrorContains(t, derr, "tailnet acme: flow logs", name)
+			assert.Empty(t, m.resources, "%s: nothing registered before the refusal", name)
+		}
+	}
+}
+
+func TestValidateAdmitsAWholeOrAbsentFlowLogConfig(t *testing.T) {
+	in := exampleInputs()
+	require.NoError(t, in.Validate())
+
+	in.FlowLogs = FlowLogConfig{Bucket: "b", RoleArn: "r"}
+	require.NoError(t, in.Validate(), "both set, not enabled: an explicit off")
+
+	in.FlowLogs.Enabled = true
+	in.Region = "eu-example-1"
+	require.NoError(t, in.Validate())
 }
 
 // wideCeiling admits everything exampleInputs renders: every network and
