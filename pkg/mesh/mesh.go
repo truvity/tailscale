@@ -18,6 +18,8 @@ package mesh
 import (
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -56,6 +58,17 @@ type (
 		// Networks are the physical networks (Network.Name) whose routers
 		// join this tailnet.
 		Networks []string
+		// Routes narrows what this tailnet exposes of a member network, by
+		// Network.Name. Set for a network, the list replaces its VPCCIDR and
+		// ExtraCIDRs as the VPC tier's destinations and as the routes
+		// auto-approved for the network's router tag and its clusters'
+		// router tags (acl.Network.Routes). Every entry lies inside VPCCIDR
+		// or an extra route, and Validate refuses a list that does not, and
+		// a name that is not one of Networks. It is per tailnet on purpose:
+		// a network that joins two tailnets carries a different list in each,
+		// and the network itself, shared by both, does not change. nil or
+		// empty, the default, exposes everything, as before.
+		Routes map[string][]string
 	}
 
 	// Network is one physical network.
@@ -70,14 +83,6 @@ type (
 		// ExtraCIDRs are further routes the network's router advertises;
 		// they are auto-approved for its tag and reachable by the VPC tier.
 		ExtraCIDRs []string
-		// Routes narrows what this tailnet exposes of the network: set, it
-		// replaces VPCCIDR and ExtraCIDRs as the VPC tier's destinations and
-		// as the routes auto-approved for the network's router tag and its
-		// clusters' router tags (acl.Network.Routes). Every entry lies inside
-		// VPCCIDR or an extra route. A network that joins two tailnets can
-		// carry a different list in each. Empty, the default, exposes
-		// everything, as before.
-		Routes []string
 		// DNSIP is the network's VPC resolver.
 		DNSIP string
 		// PrivateDomain is the domain the network's own resolver answers;
@@ -195,6 +200,12 @@ func (in Inputs) Validate() error {
 	// provider or any other resource exists. Without Routes the policy is
 	// not assembled for this, so nothing changes for an existing program.
 	if in.hasMemberRoutes() {
+		for _, name := range slices.Sorted(maps.Keys(in.Tailnet.Routes)) {
+			if len(in.Tailnet.Routes[name]) > 0 && !in.hasNetwork(name) {
+				return fmt.Errorf("tailnet %s: routes name network %q, which the tailnet does not join", in.Tailnet.Name, name)
+			}
+		}
+
 		policy, err := in.PolicyModel()
 		if err != nil {
 			return fmt.Errorf("tailnet %s: build acl policy: %w", in.Tailnet.Name, err)
@@ -222,11 +233,11 @@ func (in Inputs) Validate() error {
 	return nil
 }
 
-// hasMemberRoutes reports whether a member network with a router narrows its
-// routes (Network.Routes).
+// hasMemberRoutes reports whether the tailnet narrows the routes of any
+// network (Tailnet.Routes).
 func (in Inputs) hasMemberRoutes() bool {
-	for _, n := range in.Networks {
-		if n.Router && len(n.Routes) > 0 && in.hasNetwork(n.Name) {
+	for _, r := range in.Tailnet.Routes {
+		if len(r) > 0 {
 			return true
 		}
 	}

@@ -10,48 +10,51 @@ import (
 )
 
 // narrowedInputs is exampleInputs with the dev network's address space given
-// an extra route and its Routes cut down to part of it.
+// an extra route and the tailnet's routes for it cut down to part of it.
 func narrowedInputs() Inputs {
 	in := exampleInputs()
 
 	for i := range in.Networks {
 		if in.Networks[i].Name == "dev" {
 			in.Networks[i].ExtraCIDRs = []string{"10.99.0.0/24"}
-			in.Networks[i].Routes = []string{"10.65.8.0/24", "10.99.0.0/24"}
 		}
 	}
+
+	in.Tailnet.Routes = map[string][]string{"dev": {"10.65.8.0/24", "10.99.0.0/24"}}
 
 	return in
 }
 
-func TestRoutesOfANetworkOutsideTheTailnetChangeNothing(t *testing.T) {
-	// Routes on a network the tailnet does not join render nothing, so the
-	// policy is the one a program that never set them renders.
-	other := exampleInputs()
-	other.Tailnet.Networks = []string{"hub", "lab"}
-
-	for i := range other.Networks {
-		if other.Networks[i].Name == "dev" {
-			other.Networks[i].Routes = []string{"10.65.8.0/24"}
-		}
-	}
-
-	require.NoError(t, other.Validate())
-
+func TestEmptyRoutesChangeNothingAndAStrayNameIsRefused(t *testing.T) {
+	// Routes for a network the tailnet does not join are refused (a name
+	// that matches nothing would silently narrow nothing), but an empty
+	// entry is the same as none: the policy is the one a program that never
+	// set them renders.
 	plain := exampleInputs()
-	plain.Tailnet.Networks = []string{"hub", "lab"}
 
 	want, err := plain.PolicyModel()
 	require.NoError(t, err)
 
-	got, err := other.PolicyModel()
-	require.NoError(t, err)
-
 	wantDoc, err := acl.Build(want)
 	require.NoError(t, err)
-	gotDoc, err := acl.Build(got)
-	require.NoError(t, err)
-	assert.Equal(t, wantDoc, gotDoc)
+
+	for _, routes := range []map[string][]string{nil, {}, {"dev": nil}, {"dev": {}}, {"lab": {}, "elsewhere": nil}} {
+		in := exampleInputs()
+		in.Tailnet.Routes = routes
+		require.NoError(t, in.Validate())
+
+		got, err := in.PolicyModel()
+		require.NoError(t, err)
+
+		gotDoc, err := acl.Build(got)
+		require.NoError(t, err)
+		assert.Equal(t, wantDoc, gotDoc)
+	}
+
+	other := exampleInputs()
+	other.Tailnet.Networks = []string{"hub", "lab"}
+	other.Tailnet.Routes = map[string][]string{"dev": {"10.65.8.0/24"}}
+	require.ErrorContains(t, other.Validate(), `network "dev", which the tailnet does not join`)
 }
 
 func TestRoutesNarrowThePolicyOfOneTailnetOnly(t *testing.T) {
@@ -70,9 +73,7 @@ func TestRoutesNarrowThePolicyOfOneTailnetOnly(t *testing.T) {
 	// A second tailnet on the same network, with the same Network value but
 	// no Routes, keeps everything.
 	wide := narrowedInputs()
-	for i := range wide.Networks {
-		wide.Networks[i].Routes = nil
-	}
+	wide.Tailnet.Routes = nil
 
 	pw, err := wide.PolicyModel()
 	require.NoError(t, err)
@@ -84,29 +85,11 @@ func TestRoutesNarrowThePolicyOfOneTailnetOnly(t *testing.T) {
 
 func TestValidateRefusesRoutesThatWidenTheNetwork(t *testing.T) {
 	in := narrowedInputs()
-
-	for i := range in.Networks {
-		if in.Networks[i].Name == "dev" {
-			in.Networks[i].Routes = []string{"10.0.0.0/8"}
-		}
-	}
+	in.Tailnet.Routes = map[string][]string{"dev": {"10.0.0.0/8"}}
 
 	err := in.Validate()
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "outside the network's own address space")
-}
-
-func TestValidateIgnoresRoutesOfANetworkOutsideTheTailnet(t *testing.T) {
-	in := narrowedInputs()
-	in.Tailnet.Networks = []string{"hub", "lab"}
-
-	for i := range in.Networks {
-		if in.Networks[i].Name == "dev" {
-			in.Networks[i].Routes = []string{"10.0.0.0/8"}
-		}
-	}
-
-	require.NoError(t, in.Validate())
 }
 
 func TestCheckAdvertisedRefusesAFleetThatDisagreesWithThePolicy(t *testing.T) {
@@ -145,9 +128,7 @@ func TestRoutesStayInsideACeiling(t *testing.T) {
 	require.NoError(t, in.Validate())
 
 	// Without Routes the same ceiling refuses the whole VPC CIDR.
-	for i := range in.Networks {
-		in.Networks[i].Routes = nil
-	}
+	in.Tailnet.Routes = nil
 
 	err := in.Validate()
 	require.Error(t, err)
