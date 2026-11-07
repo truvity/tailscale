@@ -43,9 +43,18 @@ type (
 		// DeployFleet refuses the fleet otherwise. Empty, the default,
 		// advertises VPCCIDR alone.
 		ExtraCIDRs []string
-		Min        int
-		Desired    int
-		Max        int
+		// Routes narrows what the fleet advertises. Set, it replaces VPCCIDR
+		// and ExtraCIDRs as the advertised list, so one tailnet's routers can
+		// carry less of the network than another's. Each entry must be a
+		// canonical CIDR inside VPCCIDR or one of ExtraCIDRs, and no two may
+		// overlap; ValidateRoutes refuses the fleet otherwise. The policy for
+		// the same tailnet carries the same list (acl.Network.Routes), and
+		// acl.Policy.CheckAdvertised compares the two. Empty, the default,
+		// advertises VPCCIDR and ExtraCIDRs, as before.
+		Routes  []string
+		Min     int
+		Desired int
+		Max     int
 		// WarmPool enables a warm pool of the desired size.
 		WarmPool bool
 
@@ -128,9 +137,21 @@ func (t NetworkTags) withDefaults() NetworkTags {
 	return t
 }
 
+// AdvertisedRoutes is the list the fleet's routers advertise: Routes when
+// set, otherwise VPCCIDR followed by ExtraCIDRs.
+func (a FleetArgs) AdvertisedRoutes() []string {
+	if len(a.Routes) > 0 {
+		return append([]string(nil), a.Routes...)
+	}
+
+	return append([]string{a.VPCCIDR}, a.ExtraCIDRs...)
+}
+
 // ValidateRoutes refuses ExtraCIDRs that are not CIDRs, or that repeat or
 // overlap VPCCIDR or each other: two overlapping routes from one router are
-// at best redundant and at worst a misconfigured peering.
+// at best redundant and at worst a misconfigured peering. A non-empty Routes
+// must narrow them: each entry a canonical CIDR inside VPCCIDR or an extra,
+// none overlapping another.
 func (a FleetArgs) ValidateRoutes() error {
 	routes := append([]string{a.VPCCIDR}, a.ExtraCIDRs...)
 	prefixes := make([]netip.Prefix, len(routes))
@@ -148,6 +169,47 @@ func (a FleetArgs) ValidateRoutes() error {
 		}
 
 		prefixes[i] = p
+	}
+
+	return a.validateNarrowed(prefixes)
+}
+
+// validateNarrowed refuses Routes that widen the address space the fleet
+// owns (space: VPCCIDR, then the extras, already parsed).
+func (a FleetArgs) validateNarrowed(space []netip.Prefix) error {
+	narrowed := make([]netip.Prefix, 0, len(a.Routes))
+
+	for _, r := range a.Routes {
+		p, err := netip.ParsePrefix(r)
+		if err != nil {
+			return fmt.Errorf("awsrouter: advertised route %q is not a CIDR: %w", r, err)
+		}
+
+		if p.Masked() != p {
+			return fmt.Errorf("awsrouter: advertised route %q is not a canonical prefix (want %s)", r, p.Masked())
+		}
+
+		inside := false
+
+		for _, s := range space {
+			if s.Bits() <= p.Bits() && s.Contains(p.Addr()) {
+				inside = true
+
+				break
+			}
+		}
+
+		if !inside {
+			return fmt.Errorf("awsrouter: advertised route %q is outside %s", r, strings.Join(append([]string{a.VPCCIDR}, a.ExtraCIDRs...), ", "))
+		}
+
+		for i, other := range narrowed {
+			if other.Overlaps(p) {
+				return fmt.Errorf("awsrouter: advertised route %q overlaps %q", r, a.Routes[i])
+			}
+		}
+
+		narrowed = append(narrowed, p)
 	}
 
 	return nil
@@ -223,7 +285,7 @@ func (a FleetArgs) InstanceConfig(vpcID pulumi.IDOutput, subnets []pulumi.IDOutp
 		Region:                  a.Region,
 		VPCID:                   vpcID,
 		RouterSubnets:           subnets,
-		VPCCIDRs:                append([]string{a.VPCCIDR}, a.ExtraCIDRs...),
+		VPCCIDRs:                a.AdvertisedRoutes(),
 		Min:                     a.Min,
 		Desired:                 a.Desired,
 		Max:                     a.Max,
@@ -253,15 +315,22 @@ func DeployFleet(ctx *pulumi.Context, logger *slog.Logger, provider *aws.Provide
 		return err
 	}
 
-	logger.InfoContext(goCtx, "deploying Tailscale router",
+	attrs := []any{
 		slog.String("environment", args.Environment),
 		slog.String("tailnet", args.Tailnet),
 		slog.String("cidr", args.VPCCIDR),
 		slog.Any("extra_cidrs", args.ExtraCIDRs),
+	}
+
+	if len(args.Routes) > 0 {
+		attrs = append(attrs, slog.Any("routes", args.Routes))
+	}
+
+	logger.InfoContext(goCtx, "deploying Tailscale router", append(attrs,
 		slog.Int("desired", args.Desired),
 		slog.Bool("opkssh", args.OPKSSH != nil),
 		slog.Bool("host_cert", args.HostCert != nil),
-	)
+	)...)
 
 	vpc, err := ec2.LookupVpc(ctx, &ec2.LookupVpcArgs{
 		Filters: []ec2.GetVpcFilter{

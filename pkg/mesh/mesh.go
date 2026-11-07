@@ -70,6 +70,14 @@ type (
 		// ExtraCIDRs are further routes the network's router advertises;
 		// they are auto-approved for its tag and reachable by the VPC tier.
 		ExtraCIDRs []string
+		// Routes narrows what this tailnet exposes of the network: set, it
+		// replaces VPCCIDR and ExtraCIDRs as the VPC tier's destinations and
+		// as the routes auto-approved for the network's router tag and its
+		// clusters' router tags (acl.Network.Routes). Every entry lies inside
+		// VPCCIDR or an extra route. A network that joins two tailnets can
+		// carry a different list in each. Empty, the default, exposes
+		// everything, as before.
+		Routes []string
 		// DNSIP is the network's VPC resolver.
 		DNSIP string
 		// PrivateDomain is the domain the network's own resolver answers;
@@ -183,6 +191,20 @@ func (in Inputs) Validate() error {
 		return fmt.Errorf("tailnet %s: the hub network %q is primary-tailnet-only", in.Tailnet.Name, in.Hub)
 	}
 
+	// A route list that widens its network is refused here too, before the
+	// provider or any other resource exists. Without Routes the policy is
+	// not assembled for this, so nothing changes for an existing program.
+	if in.hasMemberRoutes() {
+		policy, err := in.PolicyModel()
+		if err != nil {
+			return fmt.Errorf("tailnet %s: build acl policy: %w", in.Tailnet.Name, err)
+		}
+
+		if err := policy.Validate(); err != nil {
+			return fmt.Errorf("tailnet %s: %w", in.Tailnet.Name, err)
+		}
+	}
+
 	// A policy outside its destination ceiling is refused here, before the
 	// provider or any other resource exists. Without a ceiling the policy
 	// is not even assembled, so nothing changes for an existing program.
@@ -195,6 +217,36 @@ func (in Inputs) Validate() error {
 		if err := policy.CheckCeiling(); err != nil {
 			return fmt.Errorf("tailnet %s: %w", in.Tailnet.Name, err)
 		}
+	}
+
+	return nil
+}
+
+// hasMemberRoutes reports whether a member network with a router narrows its
+// routes (Network.Routes).
+func (in Inputs) hasMemberRoutes() bool {
+	for _, n := range in.Networks {
+		if n.Router && len(n.Routes) > 0 && in.hasNetwork(n.Name) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// CheckAdvertised refuses a network whose router fleet advertises other
+// routes than the policy exposes of it, in either direction (see
+// acl.Policy.CheckAdvertised). advertised is the fleet's own list
+// (awsrouter.FleetArgs.AdvertisedRoutes). The network must be a member
+// network with a router, the only ones the policy lists.
+func (in Inputs) CheckAdvertised(network string, advertised []string) error {
+	policy, err := in.PolicyModel()
+	if err != nil {
+		return fmt.Errorf("tailnet %s: build acl policy: %w", in.Tailnet.Name, err)
+	}
+
+	if err := policy.CheckAdvertised(network, advertised); err != nil {
+		return fmt.Errorf("tailnet %s: %w", in.Tailnet.Name, err)
 	}
 
 	return nil

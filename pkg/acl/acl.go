@@ -81,6 +81,18 @@ type (
 		// tag and join VPCCIDR as destinations of the VPC tier. Empty, the
 		// default, renders exactly as before.
 		ExtraCIDRs []string `json:"extraCidrs,omitempty" yaml:"extraCidrs,omitempty"`
+		// Routes narrows what the network exposes to this tailnet. Set, the
+		// list replaces VPCCIDR and ExtraCIDRs as the destinations of the
+		// VPC tier and as the routes auto-approved for the network's router
+		// tag and for the router tags of the clusters on it, so a tailnet can
+		// be held to part of the address space the network owns while another
+		// tailnet keeps all of it. Each entry is a canonical prefix inside
+		// VPCCIDR or one of ExtraCIDRs, and no two entries overlap: Validate
+		// refuses a list that would widen the network instead of narrowing
+		// it. The same list is what the network's router fleet advertises
+		// (awsrouter.FleetArgs.Routes); CheckAdvertised compares the two.
+		// Empty, the default, renders exactly as before.
+		Routes []string `json:"routes,omitempty" yaml:"routes,omitempty"`
 	}
 
 	// Cluster is one Kubernetes cluster.
@@ -259,11 +271,24 @@ type (
 	}
 )
 
-// vpcDst is the VPC tier's destinations: the VPC CIDR, then any extra routes.
+// exposed is the list of prefixes the network exposes to the tailnet: Routes
+// when set, otherwise the VPC CIDR followed by the extra routes.
+func (n *Network) exposed() []string {
+	if len(n.Routes) > 0 {
+		return n.Routes
+	}
+
+	return append([]string{n.VPCCIDR}, n.ExtraCIDRs...)
+}
+
+// vpcDst is the VPC tier's destinations: the VPC CIDR, then any extra routes,
+// or Routes alone when it is set.
 func (n *Network) vpcDst() []string {
-	dst := []string{n.VPCCIDR + ":*"}
-	for _, c := range n.ExtraCIDRs {
-		dst = append(dst, c+":*")
+	exposed := n.exposed()
+	dst := make([]string, len(exposed))
+
+	for i, c := range exposed {
+		dst[i] = c + ":*"
 	}
 
 	return dst
@@ -296,6 +321,10 @@ func (p *Policy) Validate() error {
 			if _, err := netip.ParsePrefix(c); err != nil {
 				return fmt.Errorf("acl: network %q extra cidr %q is not a CIDR: %w", n.Name, c, err)
 			}
+		}
+
+		if err := n.validateRoutes(); err != nil {
+			return err
 		}
 	}
 
@@ -357,6 +386,132 @@ func (p *Policy) Validate() error {
 	}
 
 	return p.Ceiling.Validate()
+}
+
+// validateRoutes refuses a Routes list that is not a narrowing of the
+// network's own address space: an entry that is not a canonical prefix, that
+// lies outside VPCCIDR and every extra route, or that overlaps another entry
+// (a repeat included). Empty Routes are valid and checked for nothing.
+func (n *Network) validateRoutes() error {
+	if len(n.Routes) == 0 {
+		return nil
+	}
+
+	space, err := parsePrefixes(append([]string{n.VPCCIDR}, n.ExtraCIDRs...))
+	if err != nil {
+		return fmt.Errorf("acl: network %q: %w", n.Name, err)
+	}
+
+	routes := make([]netip.Prefix, 0, len(n.Routes))
+
+	for _, r := range n.Routes {
+		p, err := netip.ParsePrefix(r)
+		if err != nil {
+			return fmt.Errorf("acl: network %q route %q is not a CIDR: %w", n.Name, r, err)
+		}
+
+		if p.Masked() != p {
+			return fmt.Errorf("acl: network %q route %q is not a canonical prefix (want %s)", n.Name, r, p.Masked())
+		}
+
+		if !within(space, p) {
+			return fmt.Errorf("acl: network %q route %q is outside the network's own address space (%s)",
+				n.Name, r, strings.Join(append([]string{n.VPCCIDR}, n.ExtraCIDRs...), ", "))
+		}
+
+		for i, other := range routes {
+			if other.Overlaps(p) {
+				return fmt.Errorf("acl: network %q route %q overlaps %q", n.Name, r, n.Routes[i])
+			}
+		}
+
+		routes = append(routes, p)
+	}
+
+	return nil
+}
+
+// CheckAdvertised compares what a network's router fleet advertises with what
+// the policy exposes of that network, and refuses a difference in either
+// direction: an advertised route that no exposed prefix contains (routed, but
+// neither granted nor auto-approved) and an exposed prefix that no advertised
+// route contains (granted, but never routed). Containment is by a single
+// prefix, so an exposed prefix advertised as two halves is reported. Each is
+// named, advertised routes first. The policy is validated first. advertised is the fleet's own
+// list (awsrouter.FleetArgs.AdvertisedRoutes), so this package learns nothing
+// of the fleet. Nothing calls it for you; a caller that sets Network.Routes
+// or FleetArgs.Routes runs it to keep the two lists one list.
+func (p *Policy) CheckAdvertised(network string, advertised []string) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+
+	var net *Network
+
+	for i := range p.Networks {
+		if p.Networks[i].Name == network {
+			net = &p.Networks[i]
+
+			break
+		}
+	}
+
+	if net == nil {
+		return fmt.Errorf("acl: unknown network %q", network)
+	}
+
+	exposed, err := parsePrefixes(net.exposed())
+	if err != nil {
+		return fmt.Errorf("acl: network %q: %w", network, err)
+	}
+
+	adv, err := parsePrefixes(advertised)
+	if err != nil {
+		return fmt.Errorf("acl: network %q advertised routes: %w", network, err)
+	}
+
+	var errs []error
+
+	for i, a := range adv {
+		if !within(exposed, a) {
+			errs = append(errs, fmt.Errorf("acl: network %q advertises %s, which the policy neither grants nor auto-approves", network, advertised[i]))
+		}
+	}
+
+	for i, e := range exposed {
+		if !within(adv, e) {
+			errs = append(errs, fmt.Errorf("acl: network %q exposes %s, which its routers do not advertise", network, net.exposed()[i]))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// parsePrefixes parses CIDRs, naming the first that is not one.
+func parsePrefixes(cidrs []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, len(cidrs))
+
+	for i, c := range cidrs {
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not a CIDR: %w", c, err)
+		}
+
+		out[i] = p
+	}
+
+	return out, nil
+}
+
+// within reports whether some prefix of outer contains all of p.
+func within(outer []netip.Prefix, p netip.Prefix) bool {
+	for _, o := range outer {
+		if o.Bits() <= p.Bits() && o.Contains(p.Addr()) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // CheckCeiling refuses a policy whose rendered rules leave its Ceiling. It
@@ -650,6 +805,14 @@ func approvers(networks []Network, clusters []Cluster, netByName map[string]*Net
 	routes := map[string][]string{}
 
 	for i := range networks {
+		if len(networks[i].Routes) > 0 {
+			for _, r := range networks[i].Routes {
+				routes[r] = append(routes[r], "tag:"+networks[i].RouterTag)
+			}
+
+			continue
+		}
+
 		routes[networks[i].VPCCIDR] = []string{"tag:" + networks[i].RouterTag}
 
 		for _, c := range networks[i].ExtraCIDRs {
@@ -673,9 +836,7 @@ func approvers(networks []Network, clusters []Cluster, netByName map[string]*Net
 		}
 
 		if net, ok := netByName[c.Network]; ok {
-			routes[net.VPCCIDR] = append(routes[net.VPCCIDR], tag)
-
-			for _, x := range net.ExtraCIDRs {
+			for _, x := range net.exposed() {
 				routes[x] = append(routes[x], tag)
 			}
 		}
