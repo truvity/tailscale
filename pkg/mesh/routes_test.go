@@ -134,3 +134,62 @@ func TestRoutesStayInsideACeiling(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "10.65.0.0/16:*")
 }
+
+func TestRoutesForANetworkThePolicySkipsAreRefused(t *testing.T) {
+	// PolicyModel skips a network that is not declared, has no router, or is
+	// not joined, so a list for it would read as narrowed and narrow nothing.
+	// Each case asserts the message that names the network and the reason.
+	for _, tc := range []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   string
+	}{
+		{
+			name: "joined network without a router",
+			mutate: func(in *Inputs) {
+				in.Tailnet.Networks = append(in.Tailnet.Networks, "bare")
+				in.Tailnet.Routes = map[string][]string{"bare": {"10.70.0.0/24"}}
+			},
+			want: `routes name network "bare", which has no router, so the list would narrow nothing`,
+		},
+		{
+			name: "declared network without a router that is not joined",
+			mutate: func(in *Inputs) {
+				in.Tailnet.Routes = map[string][]string{"bare": {"10.70.0.0/24"}}
+			},
+			want: `routes name network "bare", which has no router, so the list would narrow nothing`,
+		},
+		{
+			name: "joined network missing from the inputs",
+			mutate: func(in *Inputs) {
+				in.Tailnet.Networks = append(in.Tailnet.Networks, "ghost")
+				in.Tailnet.Routes = map[string][]string{"ghost": {"10.71.0.0/24"}}
+			},
+			want: `routes name network "ghost", which is not declared in the inputs, so the list would narrow nothing`,
+		},
+		{
+			name: "network missing from the inputs and not joined",
+			mutate: func(in *Inputs) {
+				in.Tailnet.Routes = map[string][]string{"ghost": {"10.71.0.0/24"}}
+			},
+			want: `routes name network "ghost", which is not declared in the inputs, so the list would narrow nothing`,
+		},
+		{
+			name: "declared router network that is not joined",
+			mutate: func(in *Inputs) {
+				in.Tailnet.Networks = []string{"hub", "lab"}
+				in.Tailnet.Routes = map[string][]string{"dev": {"10.65.8.0/24"}}
+			},
+			want: `routes name network "dev", which the tailnet does not join`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := exampleInputs()
+			tc.mutate(&in)
+
+			err := in.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "tailnet acme: "+tc.want)
+		})
+	}
+}

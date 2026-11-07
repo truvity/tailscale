@@ -64,7 +64,9 @@ type (
 		// auto-approved for the network's router tag and its clusters'
 		// router tags (acl.Network.Routes). Every entry lies inside VPCCIDR
 		// or an extra route, and Validate refuses a list that does not, and
-		// a name that is not one of Networks. It is per tailnet on purpose:
+		// a name that is not one of Networks, is not declared in
+		// Inputs.Networks, or has no router (the policy skips such a network,
+		// so the list would narrow nothing). It is per tailnet on purpose:
 		// a network that joins two tailnets carries a different list in each,
 		// and the network itself, shared by both, does not change. nil or
 		// empty, the default, exposes everything, as before.
@@ -181,6 +183,10 @@ type (
 func (in Inputs) Validate() error {
 	nets := in.networkByName()
 
+	if err := in.checkRouteNames(nets); err != nil {
+		return err
+	}
+
 	for _, name := range in.Tailnet.Networks {
 		n, ok := nets[name]
 		if !ok {
@@ -200,12 +206,6 @@ func (in Inputs) Validate() error {
 	// provider or any other resource exists. Without Routes the policy is
 	// not assembled for this, so nothing changes for an existing program.
 	if in.hasMemberRoutes() {
-		for _, name := range slices.Sorted(maps.Keys(in.Tailnet.Routes)) {
-			if len(in.Tailnet.Routes[name]) > 0 && !in.hasNetwork(name) {
-				return fmt.Errorf("tailnet %s: routes name network %q, which the tailnet does not join", in.Tailnet.Name, name)
-			}
-		}
-
 		policy, err := in.PolicyModel()
 		if err != nil {
 			return fmt.Errorf("tailnet %s: build acl policy: %w", in.Tailnet.Name, err)
@@ -227,6 +227,33 @@ func (in Inputs) Validate() error {
 
 		if err := policy.CheckCeiling(); err != nil {
 			return fmt.Errorf("tailnet %s: %w", in.Tailnet.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// checkRouteNames refuses a non-empty Tailnet.Routes entry that the policy
+// would silently ignore: PolicyModel skips a network that is not declared, has
+// no router, or is not one of the tailnet's Networks, so a list for it would
+// read as narrowed and narrow nothing. An empty entry is the same as none and
+// is not checked. It runs before the membership checks so the refusal names
+// Routes rather than the network's membership.
+func (in Inputs) checkRouteNames(nets map[string]Network) error {
+	for _, name := range slices.Sorted(maps.Keys(in.Tailnet.Routes)) {
+		if len(in.Tailnet.Routes[name]) == 0 {
+			continue
+		}
+
+		n, ok := nets[name]
+
+		switch {
+		case !ok:
+			return fmt.Errorf("tailnet %s: routes name network %q, which is not declared in the inputs, so the list would narrow nothing", in.Tailnet.Name, name)
+		case !n.Router:
+			return fmt.Errorf("tailnet %s: routes name network %q, which has no router, so the list would narrow nothing", in.Tailnet.Name, name)
+		case !in.hasNetwork(name):
+			return fmt.Errorf("tailnet %s: routes name network %q, which the tailnet does not join", in.Tailnet.Name, name)
 		}
 	}
 
