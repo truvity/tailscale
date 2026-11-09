@@ -5,6 +5,10 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.31.1
+
+- Dependency updates.
+
 ## v1.31.0
 
 - **`pkg/acl`: `Ceiling`, a destination bound a tailnet can be held to (additive).** `acl.Ceiling` lists the destinations one tailnet may ever reach: each `Destination` is exactly one of a canonical prefix (`CIDR`) or a `Tag`, with a required port list (`*`, `443` or `8000-8100`). Three functions, standard library only, no change to `Build` or to any rendered output: `Validate` refuses a malformed ceiling (both or neither of `CIDR` and `Tag`, a prefix with host bits set, an empty or reversed port list, port 0 or above 65535, a repeated port, a prefix or tag listed twice); `CheckDst` takes a rendered destination (`10.0.0.0/16:*`, `tag:x:22,443`, `2001:db8::/32:443`) and refuses it unless the entries that contain it allow every port it names, failing closed on `autogroup:*`, `group:*`, host names, bare addresses and non-canonical prefixes; `Within` refuses a ceiling that reaches beyond another one, the check for a requested ceiling that must not exceed a registered one. A nil or empty ceiling admits nothing.
