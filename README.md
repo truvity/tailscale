@@ -143,7 +143,8 @@ The inputs are in [docs/reference.md](docs/reference.md).
 
 **Company part.** None. This repository defines no document that a company
 writes into its box. The tailnet, its policy and its routers are applied by the
-platform admin ([docs/doctrine.md](docs/doctrine.md#ownership-contract)).
+platform admin. What the consuming estate supplies as inputs is listed in the
+[ownership contract](docs/doctrine.md#ownership-contract).
 
 ## Consumers
 
@@ -218,11 +219,11 @@ Push a tag `vX.Y.Z`. The shared release workflow creates the GitHub Release
 and pushes the chart at that version — a chart's own `version` field is a
 placeholder that never moves — and the same tag is the Go module's version.
 
-Auto-release is present but not armed (`vars.AUTO_RELEASE` is unset), so
-every release today is a manual tag. When armed it cuts **patches only**:
-at once for a merged `security`-labelled pull request, weekly for
-dependency bumps. Minors and majors are always manual, tagged when the
-change merges and after its CHANGELOG heading.
+Auto-release is armed (the organisation sets `vars.AUTO_RELEASE` to
+`true`). It cuts **patches only**: at once for a merged
+`security`-labelled pull request, weekly for dependency bumps. Minors and
+majors are always manual, tagged when the change merges and after its
+CHANGELOG heading.
 
 ## Licence
 
