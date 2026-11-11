@@ -133,10 +133,23 @@ cluster's own resolver. The EC2 router fleet for the VPC CIDR is the same
 pattern with `pkg/awsrouter`;
 [docs/reference.md](docs/reference.md#pkgawsrouter) has the worked example.
 
+## Platform part and company part
+
+**Platform part.** The platform admin applies `charts/tailscaled` in each
+cluster that joins the tailnet, and runs a Pulumi program built on `pkg/mesh`,
+`pkg/acl` and `pkg/tailnet` (the policy, router keys and split DNS), on
+`pkg/awsrouter` (the EC2 router fleet) and on `pkg/hostaccess` (host sign-in).
+The inputs are in [docs/reference.md](docs/reference.md).
+
+**Company part.** None. This repository defines no document that a company
+writes into its box. The tailnet, its policy and its routers are applied by the
+platform admin ([docs/doctrine.md](docs/doctrine.md#ownership-contract)).
+
 ## Consumers
 
-- **truvity/gitops**: Go modules (`acl`, `tailnet`, `awsrouter`); chart
-  `tailscaled`
+- **the maintainers' platform repository**: Go packages (`acl`, `mesh`,
+  `awsrouter`, `hostaccess`); chart `tailscaled`
+- **truvity/observability**: Go package `hostaccess`
 
 ## Neighbours
 
@@ -202,7 +215,7 @@ quietly stop working.
 ## Releasing
 
 Push a tag `vX.Y.Z`. The shared release workflow creates the GitHub Release
-and pushes both charts at that version — a chart's own `version` field is a
+and pushes the chart at that version — a chart's own `version` field is a
 placeholder that never moves — and the same tag is the Go module's version.
 
 Auto-release is present but not armed (`vars.AUTO_RELEASE` is unset), so
