@@ -39,6 +39,12 @@
 //     tailnet member (autogroup:member) rather than a tag — a box any
 //     signed-in user may reach on one port, not gated by a directory
 //     group. See MemberGrant's own doc comment.
+//   - Policy.ExtraMemberCIDRGrants is the fourth, for the one shape the
+//     other three cannot name together: every tailnet member to an
+//     address range on a spelled-out port list — a resolver or a load
+//     balancer's subnet behind a router, reached by anyone signed in,
+//     not by a directory group and not by a tag. See MemberCIDRGrant's
+//     own doc comment.
 //
 // No `ssh` and no `groups` sections, deliberately. The `ssh` section
 // configures Tailscale SSH (tailscaled answering SSH itself); a router
@@ -215,6 +221,38 @@ type (
 		Ports []string `json:"ports" yaml:"ports"`
 	}
 
+	// MemberCIDRGrant is the fourth escape hatch: one explicit, narrow
+	// accept rule from EVERY tailnet member (autogroup:member) to one
+	// address range, on a spelled-out port list.
+	//
+	// None of the other three can name it: MemberGrant's destination is
+	// a tag, and CIDRGrant's source is a tag. An address range behind a
+	// subnet router that anyone signed in may reach on a few ports — a
+	// VPC's DNS resolver on 53, a load balancer's subnets on its listener
+	// ports — is neither, and it is not a VPC/Service-CIDR tier either:
+	// those are group-sourced and reach the whole range on every port.
+	//
+	// It is narrower than its siblings on purpose, because a member
+	// source is the widest source there is. DstCIDR must be a canonical
+	// prefix (no host bits set), never a default route (0.0.0.0/0 or
+	// ::/0), and Ports must be a non-empty list of single ports or
+	// ranges — "*" is refused, since a rule that admits every port of a
+	// range is the VPC tier's job, gated by a group, not this one's.
+	//
+	// This is deliberately the ONLY shape ExtraMemberCIDRGrants accepts —
+	// autogroup:member to one address range, ports only, no tags, no
+	// groups, no other autogroup.
+	MemberCIDRGrant struct {
+		// DstCIDR is the destination range as a canonical prefix, e.g.
+		// "10.1.0.2/32" for one address or "10.1.32.0/20" for a subnet.
+		DstCIDR string `json:"dstCidr" yaml:"dstCidr"`
+		// Ports the rule admits on DstCIDR: single ports or ranges
+		// ("53", "443", "8000-8100"), each listed once. Every entry is
+		// rendered into one comma-joined dst ("10.1.0.2/32:53"), the
+		// same spelling the other grants use. Required, and never "*".
+		Ports []string `json:"ports" yaml:"ports"`
+	}
+
 	// Policy is the whole tailnet's input model. Plain data,
 	// yaml/json-taggable.
 	Policy struct {
@@ -242,6 +280,13 @@ type (
 		// tailnet member rather than a tag. See MemberGrant's own doc
 		// comment. Rendered after ExtraCIDRGrants, in the order given.
 		ExtraMemberGrants []MemberGrant `json:"extraMemberGrants,omitempty" yaml:"extraMemberGrants,omitempty"`
+		// ExtraMemberCIDRGrants are one-off autogroup:member-to-address
+		// accept rules — the fourth escape hatch, for a source that is
+		// every tailnet member and a destination that is an address range.
+		// See MemberCIDRGrant's own doc comment. Rendered after
+		// ExtraMemberGrants, in the order given. Empty, the default,
+		// renders exactly as before.
+		ExtraMemberCIDRGrants []MemberCIDRGrant `json:"extraMemberCidrGrants,omitempty" yaml:"extraMemberCidrGrants,omitempty"`
 		// Ceiling bounds the destination of every rule Build renders, the
 		// derived tiers, the router tags and the three Extra* grants alike:
 		// one invariant instead of a list of rows to remember. A rule whose
@@ -382,6 +427,12 @@ func (p *Policy) Validate() error {
 				"a MemberGrant admitting a whole tag with no port list is "+
 				"exactly the blast radius this type exists to avoid, so it is "+
 				"refused rather than defaulted to everything", g.DstTag)
+		}
+	}
+
+	for _, g := range p.ExtraMemberCIDRGrants {
+		if err := g.validate(); err != nil {
+			return err
 		}
 	}
 
@@ -615,6 +666,7 @@ func (p *Policy) document() policyDoc {
 	acls = append(acls, grantRules(p.ExtraGrants)...)
 	acls = append(acls, cidrGrantRules(p.ExtraCIDRGrants)...)
 	acls = append(acls, memberGrantRules(p.ExtraMemberGrants)...)
+	acls = append(acls, memberCIDRGrantRules(p.ExtraMemberCIDRGrants)...)
 
 	return policyDoc{
 		TagOwners:     tagOwners(manager, p.ExtraTagOwners, networks, clusters),
@@ -795,6 +847,62 @@ func memberGrantRules(grants []MemberGrant) []rule {
 			Action: accept,
 			Src:    []string{"autogroup:member"},
 			Dst:    []string{"tag:" + g.DstTag + ":" + strings.Join(g.Ports, ",")},
+		})
+	}
+
+	return out
+}
+
+// validate refuses a MemberCIDRGrant that would admit more than the one
+// range and ports it names: a missing or non-canonical prefix, a default
+// route, an empty port list, "*", or a malformed or repeated port.
+func (g MemberCIDRGrant) validate() error {
+	if g.DstCIDR == "" {
+		return fmt.Errorf("acl: extra member cidr grant %+v needs dstCidr", g)
+	}
+
+	prefix, err := parsePrefix(g.DstCIDR)
+	if err != nil {
+		return fmt.Errorf("acl: extra member cidr grant autogroup:member -> %s: %w", g.DstCIDR, err)
+	}
+
+	if prefix.Bits() == 0 {
+		return fmt.Errorf("acl: extra member cidr grant autogroup:member -> %s is a default route: "+
+			"every tailnet member to every address is refused rather than rendered", g.DstCIDR)
+	}
+
+	if len(g.Ports) == 0 {
+		return fmt.Errorf("acl: extra member cidr grant autogroup:member -> %s has no ports: "+
+			"a MemberCIDRGrant admitting a whole range with no port list is "+
+			"exactly the blast radius this type exists to avoid, so it is "+
+			"refused rather than defaulted to everything", g.DstCIDR)
+	}
+
+	for _, port := range g.Ports {
+		if port == "*" {
+			return fmt.Errorf("acl: extra member cidr grant autogroup:member -> %s lists \"*\": "+
+				"every port of a range is the VPC tier's, gated by a group; name the ports", g.DstCIDR)
+		}
+	}
+
+	if _, err := parsePorts(g.Ports, true); err != nil {
+		return fmt.Errorf("acl: extra member cidr grant autogroup:member -> %s: %w", g.DstCIDR, err)
+	}
+
+	return nil
+}
+
+// memberCIDRGrantRules renders each ExtraMemberCIDRGrant as one rule, the
+// same way the other grants render — order preserved, not sorted, the
+// source the literal Tailscale keyword.
+func memberCIDRGrantRules(grants []MemberCIDRGrant) []rule {
+	out := make([]rule, 0, len(grants))
+
+	for _, g := range grants {
+		out = append(out, rule{
+			Action: accept,
+			Src:    []string{"autogroup:member"},
+			Dst:    []string{g.DstCIDR + ":" + strings.Join(g.Ports, ",")},
 		})
 	}
 
