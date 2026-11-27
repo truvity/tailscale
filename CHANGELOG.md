@@ -5,6 +5,10 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.32.0
+
+- **`pkg/acl`: `Policy.ExtraMemberCIDRGrants`, every tailnet member to an address range on named ports (additive).** A fourth escape hatch beside `ExtraGrants`, `ExtraCIDRGrants` and `ExtraMemberGrants`, for the one shape none of them names: `autogroup:member` to a CIDR (a VPC's DNS resolver on 53, a load balancer's subnets on its listener ports). Each `MemberCIDRGrant` renders one rule, `autogroup:member` → `<cidr>:<ports>`, after the member grants, in the order given; it adds no tag owner and no route approval. `Validate` refuses a missing or non-canonical prefix, an IPv4-mapped prefix, a default route (`0.0.0.0/0`, `::/0`), an empty port list, `"*"`, and a malformed or repeated port. `Policy.Ceiling` bounds it like every other rule, and `mesh.Inputs.Policy` carries it through unchanged. Empty, the default, renders byte-identical output.
+
 ## v1.31.4
 
 - Dependency updates.

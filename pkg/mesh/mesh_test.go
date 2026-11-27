@@ -105,11 +105,13 @@ func TestPolicyModelKeepsTheCallersOwnExtras(t *testing.T) {
 	in := exampleInputs()
 	in.Policy.ExtraTagOwners = map[string][]string{"extra": {"autogroup:admin"}}
 	in.Policy.ExtraMemberGrants = []acl.MemberGrant{{DstTag: "extra", Ports: []string{"80"}}}
+	in.Policy.ExtraMemberCIDRGrants = []acl.MemberCIDRGrant{{DstCIDR: "10.20.0.2/32", Ports: []string{"53"}}}
 
 	p, err := in.PolicyModel()
 	require.NoError(t, err)
 	assert.Equal(t, in.Policy.ExtraTagOwners, p.ExtraTagOwners)
 	assert.Equal(t, in.Policy.ExtraMemberGrants, p.ExtraMemberGrants)
+	assert.Equal(t, in.Policy.ExtraMemberCIDRGrants, p.ExtraMemberCIDRGrants)
 }
 
 func TestSplitDNSEntries(t *testing.T) {
