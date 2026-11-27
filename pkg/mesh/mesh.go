@@ -53,8 +53,17 @@ type (
 		// rule naming any other would reference a group it never learns.
 		Domain string
 		// Primary marks the account's primary tailnet: the only one that
-		// carries flow logs, and the only one the hub network may join.
+		// carries flow logs, and the only one the hub network may join
+		// unless HubAllowed says otherwise.
 		Primary bool
+		// HubAllowed lets a non-primary tailnet route the hub network too.
+		// Off by default: the hub is primary-tailnet-only, refused by the
+		// absence of a path rather than by an ACL rule. Setting it is an
+		// owner's explicit choice to give that tailnet a route into the
+		// hub's VPC, where its ACL (for example ExtraMemberCIDRGrants) is
+		// then the only fence; Validate still refuses it on a tailnet that
+		// does not list the hub in Networks, so a stray flag adds nothing.
+		HubAllowed bool
 		// Networks are the physical networks (Network.Name) whose routers
 		// join this tailnet.
 		Networks []string
@@ -198,8 +207,14 @@ func (in Inputs) Validate() error {
 		}
 	}
 
-	if in.Hub != "" && !in.Tailnet.Primary && in.hasNetwork(in.Hub) {
-		return fmt.Errorf("tailnet %s: the hub network %q is primary-tailnet-only", in.Tailnet.Name, in.Hub)
+	if in.Hub != "" && !in.Tailnet.Primary && !in.Tailnet.HubAllowed && in.hasNetwork(in.Hub) {
+		return fmt.Errorf("tailnet %s: the hub network %q is primary-tailnet-only "+
+			"(set Tailnet.HubAllowed to route it from this tailnet)", in.Tailnet.Name, in.Hub)
+	}
+
+	if in.Tailnet.HubAllowed && (in.Tailnet.Primary || in.Hub == "" || !in.hasNetwork(in.Hub)) {
+		return fmt.Errorf("tailnet %s: HubAllowed is only for a non-primary tailnet that lists the hub network %q",
+			in.Tailnet.Name, in.Hub)
 	}
 
 	// A route list that widens its network is refused here too, before the
