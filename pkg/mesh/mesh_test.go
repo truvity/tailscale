@@ -54,8 +54,21 @@ func TestValidate(t *testing.T) {
 	// The hub joins the primary tailnet alone.
 	in.Tailnet.Primary = false
 	require.ErrorContains(t, in.Validate(), "primary-tailnet-only")
-	in.Tailnet.Networks = []string{"dev"}
+
+	// Unless the owner opts a non-primary tailnet in explicitly.
+	in.Tailnet.HubAllowed = true
 	require.NoError(t, in.Validate())
+
+	// The opt-in is refused where it would mean nothing: off the hub, or on
+	// the primary tailnet.
+	in.Tailnet.Networks = []string{"dev"}
+	require.ErrorContains(t, in.Validate(), "HubAllowed is only for")
+	in.Tailnet.HubAllowed = false
+	require.NoError(t, in.Validate())
+
+	primary := exampleInputs()
+	primary.Tailnet.HubAllowed = true
+	require.ErrorContains(t, primary.Validate(), "HubAllowed is only for")
 
 	in.Tailnet.Networks = []string{"nowhere"}
 	require.ErrorContains(t, in.Validate(), "not declared")
