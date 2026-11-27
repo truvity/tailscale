@@ -5,6 +5,10 @@ heading here is a patch cut automatically for dependency bumps alone; its
 GitHub Release lists them. The chart and the Go module are released
 together at every version.
 
+## v1.31.4
+
+- Dependency updates.
+
 ## v1.31.3
 
 - Dependency updates.
